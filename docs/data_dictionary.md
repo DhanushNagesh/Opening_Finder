@@ -92,7 +92,7 @@ Each file holds one real game, copied verbatim, except `2013-02_first_500.pgn`.
 | `2013_no_rating_diff.pgn` | RatingDiff keys absent |
 | `2024_abandoned_zero_moves.pgn` | Abandoned, movetext ` 0-1`, ECO `?` |
 | `2024_abandoned_one_move.pgn` | Abandoned after one ply |
-| `2024_zero_moves_normal.pgn` | Zero moves, Termination `Time forfeit`, swiss Event, no RatingDiff |
+| `2024_zero_moves_time_forfeit.pgn` | Zero moves, Termination `Time forfeit`, swiss Event, no RatingDiff |
 | `2024_rules_infraction.pgn` | `Rules infraction` |
 | `2024_clk_eval_mate.pgn` | `[%clk]` + `[%eval #N]` on every move |
 | `2024_correspondence.pgn` | Correspondence with clocks |
