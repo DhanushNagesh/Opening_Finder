@@ -36,7 +36,7 @@ Label: defensible.
 Revisit if: single-reader decompression becomes the ceiling. Then measure the chunked process pool (PLAN phase 2, task 2).
 
 ## D-003 — Own parser, python-chess only as a test oracle
-Date: 2026-11-13 · Phase: 1 · Status: Proposed (confirm with phase 1 throughput numbers)
+Date: 2026-11-13 · Phase: 1 · Status: Accepted (phase 1: 60.6K vs 1.9K games/sec, ~32×, `benchmarks/results.md`)
 Context: python-chess parses PGN correctly but replays every move on a board, which is slow at hundreds of millions of games.
 Options: (a) python-chess everywhere; (b) a line-based state machine that doesn't validate move legality.
 Decision: (b) for the pipeline, (a) in tests to check `ply_count` and splitting on a sample.
@@ -111,3 +111,12 @@ Decision: (b).
 Why: One definition across all years, so 2013 and 2024 rating-band × speed cells are comparable. The label would mix today's rapid games into 2013 classical.
 Label: defensible.
 Revisit if: we want Lichess's historical labels as shown to users at the time, for example to match their own stats pages.
+
+## D-012 — Strict game validation: missing headers and truncation make a game malformed, not null
+Date: 2026-11-13 · Phase: 1 · Status: Accepted
+Context: The parser has to choose what to do with a game that doesn't look like the samples: a missing header, an unparseable value, or movetext cut off (the last game of a dropped stream).
+Options: (a) fill gaps with null and keep the row; (b) reject the game, count it in `ParseStats` by reason, and keep parsing.
+Decision: (b). The 13 headers present in 100% of both phase 0 samples are required. Movetext must end in a result token that matches the `Result` header, with balanced `{}`/`()`. Values that don't parse (`WhiteElo "abc"`, a `Site` that isn't `https://lichess.org/<8 alnum>`) also reject the game. The known null forms are the exceptions: `?` Elo/ECO/Opening and absent RatingDiff.
+Why: A truncated game has a correct header block, so under (a) it would land in bronze with a wrong `ply_count` and nobody would notice. Requiring the result token is a check that costs nothing, and schema drift shows up as a malformed count instead of a quiet rise in nulls.
+Label: defensible. Fragile point: if some untested year lacks one of the 13 headers (e.g. `Termination` in an early file), every game in that month is rejected. The behaviour is loud, which is what we want, but bronze must fail the month on a malformed-rate threshold, not silently write an empty partition (phase 2).
+Revisit if: a real month shows a header missing for a legitimate reason; then make that one header optional with an explicit null rule.
