@@ -5,6 +5,7 @@ description = "Lichess PGN dumps to Parquet, silver and gold tables for an openi
 requires-python = ">=3.11,<3.12"
 dependencies = [
     "pyarrow==26.0.1",
+    "pyspark==3.5.9",
     "zstandard==0.25.0",
 ]
 

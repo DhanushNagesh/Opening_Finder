@@ -147,3 +147,21 @@ Decision: Single process. The chunked process pool waits for phase 5, where a fu
 Why: At 100 Mbit/s the download and the parser run at about the same speed, so a pool only helps on a faster link. Adding it before measuring means complexity you can't justify with a number.
 Label: defensible.
 Revisit if: phase 5 shows parse time clearly above download time for a 2024 month.
+
+## D-016 — `opening_family` = text before the first `:`, minus a trailing `#N`
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: PLAN defines the family as the text before the first `:`. In 2013-02 many names have no colon but end in a sibling-line number: `Philidor Defense #3` (1,791 games), `Queen's Pawn Game #2` (1,642), `Pirc Defense #4` (1,004). Under the plain rule each would be its own family.
+Options: (a) colon split only; (b) colon split, then strip `\s+#\d+$`; (c) map ECO codes to families with a lookup table.
+Decision: (b).
+Why: `#N` marks a numbered line inside the same opening, so leaving it in splits one family's sample across several rows and weakens the Wilson bound for no reason. (c) is more precise but needs a curated table to maintain.
+Label: defensible. Fragile point: names written with a comma and no colon (`King's Gambit Declined, Queen's Knight Defense`, 280 games; `Englund Gambit Declined, Reversed French`, 302) stay as their own family. Lichess's current naming uses colons there, so check whether 2024 still has comma-only names before deciding whether to handle them.
+Revisit if: a 2024 month shows many comma-only names, or gold needs families that match ECO groupings.
+
+## D-017 — Silver: dedup keeps the earliest row; file count sized from row count
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: `dropDuplicates` keeps an arbitrary row when duplicates differ, so two runs could keep different rows. Separately, Spark's default 200 shuffle partitions wrote 200 files of ~200 KB for a 124K-row month (AQE doesn't merge them once the frame is cached).
+Options: dedup with `dropDuplicates` vs. `row_number()` over `game_id` ordered by `utc_datetime, movetext`. Files: default partitions, `coalesce(1)`, or `repartition(ceil(rows / 500K), game_id)`.
+Decision: `row_number()` with a fixed order. `repartition(ceil(rows / 500K), "game_id")`, written as zstd Parquet (Spark's default is snappy; bronze is already zstd).
+Why: A fixed order makes the kept row deterministic, which the "reruns give the same aggregates" rule needs once duplicates actually show up (0 in 2013-02). The row count is already computed for the DQ check, so sizing files from it costs nothing. 2013-02 → 1 file of 23.6 MB instead of 200 tiny ones. `coalesce(1)` would put a 2024 month (~90M games) into one task and one huge file.
+Label: defensible. The 500K rows per file is a guess until phase 5 measures file size against read time. At 2013's ~190 bytes per silver row that's ~95 MB per file; 2024 rows with clocks are bigger.
+Revisit if: phase 5's file-size benchmark points to a different target.
