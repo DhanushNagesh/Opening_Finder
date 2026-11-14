@@ -1,0 +1,13 @@
+data/
+*.pgn
+*.pgn.zst
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+dbt/target/
+dbt/logs/
+logs/
+.env
+PLAN.md
+CLAUDE.md
