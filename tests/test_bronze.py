@@ -137,3 +137,56 @@ def test_rejects_bad_month(month: str, tmp_path: Path) -> None:
 def test_local_path_must_match_month_when_verifying(tmp_path: Path) -> None:
     with pytest.raises(BronzeError, match="--no-verify"):
         bronze.run(MONTH, str(FIXTURES / "2013-02_first_500.pgn"), tmp_path)
+
+
+def test_is_current_needs_verified_matching_sha(
+    compressed: bytes, tmp_path: Path
+) -> None:
+    sha = hashlib.sha256(compressed).hexdigest()
+    assert not bronze.is_current(MONTH, tmp_path, sha)
+    write(compressed, tmp_path)  # unverified: hash recorded, checksum_verified false
+    assert not bronze.is_current(MONTH, tmp_path, sha)
+    write(compressed, tmp_path, expected=sha)
+    assert bronze.is_current(MONTH, tmp_path, sha)
+    assert not bronze.is_current(MONTH, tmp_path, "0" * 64)
+
+
+def test_skip_if_current_does_not_touch_partition(
+    compressed: bytes, tmp_path: Path, monkeypatch, capsys
+) -> None:
+    sha = hashlib.sha256(compressed).hexdigest()
+    write(compressed, tmp_path, expected=sha)
+    part = tmp_path / f"month={MONTH}" / "part-00000.parquet"
+    mtime = part.stat().st_mtime_ns
+    monkeypatch.setattr(bronze, "published_sha256", lambda _name: sha)
+    monkeypatch.setattr(
+        bronze, "run", lambda *a, **k: pytest.fail("run() called on a current month")
+    )
+
+    code = bronze.main(["--month", MONTH, "--out", str(tmp_path), "--skip-if-current"])
+
+    assert code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "status": "skipped",
+        "month": MONTH,
+        "sha256": sha,
+    }
+    assert part.stat().st_mtime_ns == mtime
+
+
+def test_data_errors_exit_3_and_others_exit_1(tmp_path: Path, monkeypatch) -> None:
+    def fail(exc: Exception):
+        def _run(*a, **k):
+            raise exc
+
+        return _run
+
+    monkeypatch.setattr(bronze, "run", fail(bronze.DataError("malformed rate")))
+    assert bronze.main(["--month", MONTH, "--out", str(tmp_path)]) == 3
+    monkeypatch.setattr(bronze, "run", fail(BronzeError("sha256 mismatch")))
+    assert bronze.main(["--month", MONTH, "--out", str(tmp_path)]) == 1
+
+
+def test_malformed_rate_is_a_data_error(compressed: bytes, tmp_path: Path) -> None:
+    with pytest.raises(bronze.DataError):
+        write(compressed[: len(compressed) - 200], tmp_path, max_malformed_rate=0.0)

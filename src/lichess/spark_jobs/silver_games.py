@@ -3,7 +3,8 @@
     JAVA_HOME=/opt/homebrew/opt/openjdk@17 uv run python -m lichess.spark_jobs.silver_games --month 2013-02
 
 Writes `silver_root/month=YYYY-MM/` with dynamic partition overwrite, so only that
-month is replaced (D-005).
+month is replaced (D-005). Exit code 3 means a data-quality failure, which a retry
+won't fix; any other non-zero exit (JVM crash, OOM) may be worth retrying.
 """
 
 import argparse
@@ -19,6 +20,7 @@ from pyspark.sql import functions as F
 # Spark's default 200 shuffle partitions gave 200 files of ~200 KB for 2013-02. Size
 # the file count from the row count instead; phase 5 measures the right target (D-017).
 ROWS_PER_FILE = 500_000
+EXIT_DATA_ERROR = 3
 
 
 class DataQualityError(RuntimeError):
@@ -176,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         stats = run(spark, args.month, args.bronze, args.silver)
     except DataQualityError as e:
         print(f"data quality check failed: {e}", file=sys.stderr)
-        return 1
+        return EXIT_DATA_ERROR
     finally:
         spark.stop()
     print(json.dumps(stats, indent=2))

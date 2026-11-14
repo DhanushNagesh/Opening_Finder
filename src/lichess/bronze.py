@@ -2,6 +2,10 @@
 
     uv run python -m lichess.bronze --month 2013-02
     uv run python -m lichess.bronze --month 2013-02 --source data/raw/lichess_db_standard_rated_2013-02.pgn.zst
+    uv run python -m lichess.bronze --month 2013-02 --skip-if-current
+
+Exit codes: 0 written or skipped (the JSON on stdout says which), 1 retryable failure
+(network, checksum), 3 data error that a retry won't fix (malformed rate, no games).
 
 URL mode streams HTTP -> SHA-256 -> zstd -> parser -> Parquet; nothing raw touches disk
 (D-009). The partition is built in a temp dir and swapped in only after the checksum
@@ -77,8 +81,15 @@ _GAME_FIELDS = [f for f in _FIELDS if f != "utc_datetime"]
 _MONTH_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])")
 
 
+EXIT_DATA_ERROR = 3
+
+
 class BronzeError(RuntimeError):
     pass
+
+
+class DataError(BronzeError):
+    """The input itself is bad: re-streaming the same immutable file fails the same way."""
 
 
 def month_filename(month: str) -> str:
@@ -221,11 +232,11 @@ def write_partition(
             )
         total = stats.games_ok + stats.games_malformed
         if stats.games_ok == 0:
-            raise BronzeError(
+            raise DataError(
                 f"no valid games in {month} (malformed: {stats.malformed_reasons})"
             )
         if stats.games_malformed / total > max_malformed_rate:
-            raise BronzeError(
+            raise DataError(
                 f"malformed rate {stats.games_malformed}/{total} over {max_malformed_rate:.2%} "
                 f"for {month}: {stats.malformed_reasons}"
             )
@@ -266,6 +277,18 @@ def _swap_in(tmp: Path, final: Path) -> None:
     shutil.rmtree(old, ignore_errors=True)
 
 
+def is_current(month: str, out_root: Path, expected_sha256: str) -> bool:
+    """True if the partition on disk was built from a verified copy of this exact file."""
+    try:
+        stats = json.loads((out_root / f"month={month}" / "_stats.json").read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return False
+    return (
+        stats.get("checksum_verified") is True
+        and stats.get("sha256") == expected_sha256
+    )
+
+
 def check_disk(out_root: Path, needed_bytes: int) -> None:
     out_root.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(out_root).free
@@ -277,7 +300,7 @@ def check_disk(out_root: Path, needed_bytes: int) -> None:
 
 def run(month: str, source: str, out_root: Path, verify: bool = True) -> BronzeStats:
     if not _MONTH_RE.fullmatch(month):
-        raise BronzeError(f"month must be YYYY-MM, got {month!r}")
+        raise DataError(f"month must be YYYY-MM, got {month!r}")
     filename = month_filename(month)
 
     if source == "url":
@@ -318,7 +341,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--no-verify", action="store_true", help="skip the published SHA-256 check"
     )
+    ap.add_argument(
+        "--skip-if-current",
+        action="store_true",
+        help="do nothing if the partition's _stats.json has the published SHA-256",
+    )
     args = ap.parse_args(argv)
+    if args.skip_if_current and args.no_verify:
+        ap.error("--skip-if-current needs the published checksum; drop --no-verify")
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
@@ -326,11 +356,26 @@ def main(argv: list[str] | None = None) -> int:
     logging.getLogger("lichess.parser").setLevel(logging.ERROR)
 
     try:
+        if args.skip_if_current:
+            expected = published_sha256(month_filename(args.month))
+            if is_current(args.month, args.out, expected):
+                log.info("month=%s already matches %s, skipping", args.month, expected)
+                print(
+                    json.dumps(
+                        {"status": "skipped", "month": args.month, "sha256": expected}
+                    )
+                )
+                return 0
         stats = run(args.month, args.source, args.out, verify=not args.no_verify)
+    except DataError as e:
+        log.error("%s", e)
+        return EXIT_DATA_ERROR
     except BronzeError as e:
         log.error("%s", e)
         return 1
-    summary = {k: v for k, v in asdict(stats).items() if k != "malformed_examples"}
+    summary = {"status": "written"} | {
+        k: v for k, v in asdict(stats).items() if k != "malformed_examples"
+    }
     print(json.dumps(summary, indent=2))
     return 0
 
