@@ -120,3 +120,48 @@ Decision: (b). The 13 headers present in 100% of both phase 0 samples are requir
 Why: A truncated game has a correct header block, so under (a) it would land in bronze with a wrong `ply_count` and nobody would notice. Requiring the result token is a check that costs nothing, and schema drift shows up as a malformed count instead of a quiet rise in nulls.
 Label: defensible. Fragile point: if some untested year lacks one of the 13 headers (e.g. `Termination` in an early file), every game in that month is rejected. The behaviour is loud, which is what we want, but bronze must fail the month on a malformed-rate threshold, not silently write an empty partition (phase 2).
 Revisit if: a real month shows a header missing for a legitimate reason; then make that one header optional with an explicit null rule.
+
+## D-013 — Store time of day as a UTC timestamp, not a TIME column
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: The `Game` model has `utc_date` and `utc_time`. Parquet has no seconds-unit TIME or TIMESTAMP (PyArrow silently writes `time32[s]` as milliseconds), and Spark 3.5 can't read Parquet TIME columns at all.
+Options: (a) `utc_time` as a `"HH:MM:SS"` string; (b) seconds since midnight as an int; (c) `utc_datetime` as `timestamp[ms, UTC]` next to `utc_date`.
+Decision: (c). Bronze keeps `utc_date` (date32) and adds `utc_datetime`; there's no separate time column.
+Why: Every engine downstream (Spark, DuckDB, pandas) reads a Parquet timestamp natively, so nobody has to re-parse a string or remember what an int means. The date column is redundant, but it's what gold filters on and costs almost nothing in a dictionary-encoded column.
+Label: defensible.
+Revisit if: we move to Spark 4, which supports TIME, and have a reason to keep time of day without a date.
+
+## D-014 — Bronze guards: 0.1% malformed limit, 2× disk headroom, stdlib HTTP
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: D-012 says bronze must fail a month loudly instead of quietly writing a thin partition. The URL stream also needs a free-disk check before a big month starts (CLAUDE.md).
+Options: limits of 0 / 0.1% / 1%; disk headroom 1× / 1.5× / 2× the compressed size; `requests`/`httpx` or `urllib`.
+Decision: Fail the month if malformed games exceed 0.1% or if no valid games were parsed. Require free disk of 2× the source's Content-Length before streaming. Use `urllib.request`.
+Why: 2013-02 has 0 malformed games out of 123,961, so 0.1% (~124 games, or ~90K in a 2024 month) is far above normal and well below what a header change would cause (100% rejected). A limit of 0 would fail a whole 30 GB month over one odd game. Bronze came out 1.42× the compressed size for 2013-02, so 1.5× was too tight and 2× leaves room. `urllib` streams a response body as a file object, which is all we need, without adding a dependency.
+Label: defensible. Fragile points: a truncated stream on a small test file (one game cut of 500 = 0.2%) trips the limit, but on a real month the checksum is what catches truncation, not the limit. The 1.42× ratio was measured on 2013 only. 2024 games carry `[%clk]` on every move and may compress differently; re-measure in phase 5.
+Revisit if: a real month legitimately exceeds 0.1%, or phase 5 shows bronze is larger than 2× the source for 2024.
+
+## D-015 — No process pool for bronze yet
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: PLAN phase 2 task 2 says parallelise inside one file only once single-process speed is measured and is actually the bottleneck.
+Measured: 2013-02 bronze end to end is 2.5 s from a local file and 3.3 s from the URL (18.2 MB). Phase 1 put single-core parsing at ~12 MB/s compressed for 2024-style games, so a 30 GB month is ~41 min of parsing, and a 100 Mbit/s download needs ~40 min.
+Decision: Single process. The chunked process pool waits for phase 5, where a full 2024 month gives the real split between network time and parse time.
+Why: At 100 Mbit/s the download and the parser run at about the same speed, so a pool only helps on a faster link. Adding it before measuring means complexity you can't justify with a number.
+Label: defensible.
+Revisit if: phase 5 shows parse time clearly above download time for a 2024 month.
+
+## D-016 — `opening_family` = text before the first `:`, minus a trailing `#N`
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: PLAN defines the family as the text before the first `:`. In 2013-02 many names have no colon but end in a sibling-line number: `Philidor Defense #3` (1,791 games), `Queen's Pawn Game #2` (1,642), `Pirc Defense #4` (1,004). Under the plain rule each would be its own family.
+Options: (a) colon split only; (b) colon split, then strip `\s+#\d+$`; (c) map ECO codes to families with a lookup table.
+Decision: (b).
+Why: `#N` marks a numbered line inside the same opening, so leaving it in splits one family's sample across several rows and weakens the Wilson bound for no reason. (c) is more precise but needs a curated table to maintain.
+Label: defensible. Fragile point: names written with a comma and no colon (`King's Gambit Declined, Queen's Knight Defense`, 280 games; `Englund Gambit Declined, Reversed French`, 302) stay as their own family. Lichess's current naming uses colons there, so check whether 2024 still has comma-only names before deciding whether to handle them.
+Revisit if: a 2024 month shows many comma-only names, or gold needs families that match ECO groupings.
+
+## D-017 — Silver: dedup keeps the earliest row; file count sized from row count
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: `dropDuplicates` keeps an arbitrary row when duplicates differ, so two runs could keep different rows. Separately, Spark's default 200 shuffle partitions wrote 200 files of ~200 KB for a 124K-row month (AQE doesn't merge them once the frame is cached).
+Options: dedup with `dropDuplicates` vs. `row_number()` over `game_id` ordered by `utc_datetime, movetext`. Files: default partitions, `coalesce(1)`, or `repartition(ceil(rows / 500K), game_id)`.
+Decision: `row_number()` with a fixed order. `repartition(ceil(rows / 500K), "game_id")`, written as zstd Parquet (Spark's default is snappy; bronze is already zstd).
+Why: A fixed order makes the kept row deterministic, which the "reruns give the same aggregates" rule needs once duplicates actually show up (0 in 2013-02). The row count is already computed for the DQ check, so sizing files from it costs nothing. 2013-02 → 1 file of 23.6 MB instead of 200 tiny ones. `coalesce(1)` would put a 2024 month (~90M games) into one task and one huge file.
+Label: defensible. The 500K rows per file is a guess until phase 5 measures file size against read time. At 2013's ~190 bytes per silver row that's ~95 MB per file; 2024 rows with clocks are bigger.
+Revisit if: phase 5's file-size benchmark points to a different target.
