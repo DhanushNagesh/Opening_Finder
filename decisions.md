@@ -84,3 +84,12 @@ Decision: Compute blunder tables from that subset only, show the subset size, an
 Why: Running an engine over millions of games is out of scope. Hiding the bias would be the worse choice.
 Label: defensible.
 Revisit if: we add a Stockfish pass on a random sample to measure how biased the analysed subset is.
+
+## D-009 — Stream raw files from the Lichess URL; don't keep a local raw copy
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: A 2024 month is ~30 GB compressed. Keeping raw files plus bronze would need ~60 GB per big month on a laptop with ~134 GB free. Builds on D-002.
+Options: (a) download raw to `data/raw/`, then parse; (b) stream HTTP → zstd → parser → Parquet with nothing raw on disk; (c) store raw/bronze in cloud object storage; (d) query the HF Parquet remotely instead of parsing.
+Decision: (b) for every month. A local file path is still accepted for test fixtures and tiny 2013 months. (d) is used only as a cross-check and benchmark comparison, per D-001.
+Why: Disk at peak drops to the bronze output only. Lichess monthly files are immutable and permanently hosted, so the source acts as the raw layer: reprocessing means re-streaming, which costs download time instead of disk. Integrity is kept by computing SHA-256 on the stream and comparing it to Lichess's published checksum before the new partition replaces the old one.
+Label: defensible. Fragile points: a rerun of a 2024 month re-downloads ~30 GB; a dropped connection mid-stream fails the whole month (no resume), so retries restart from zero.
+Revisit if: Lichess changes or removes old files, reruns of big months become frequent, or connection drops make retries too expensive. Then keep raw in Cloudflare R2 (no egress fees, ~$0.015/GB-month past the free 10 GB).
