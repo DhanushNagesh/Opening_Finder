@@ -93,3 +93,21 @@ Decision: (b) for every month. A local file path is still accepted for test fixt
 Why: Disk at peak drops to the bronze output only. Lichess monthly files are immutable and permanently hosted, so the source acts as the raw layer: reprocessing means re-streaming, which costs download time instead of disk. Integrity is kept by computing SHA-256 on the stream and comparing it to Lichess's published checksum before the new partition replaces the old one.
 Label: defensible. Fragile points: a rerun of a 2024 month re-downloads ~30 GB; a dropped connection mid-stream fails the whole month (no resume), so retries restart from zero.
 Revisit if: Lichess changes or removes old files, reruns of big months become frequent, or connection drops make retries too expensive. Then keep raw in Cloudflare R2 (no egress fees, ~$0.015/GB-month past the free 10 GB).
+
+## D-010 — Partition by source file month, not by `UTCDate`
+Date: 2026-11-13 · Phase: 0 · Status: Accepted
+Context: The 2013-02 file contains 166 games with `UTCDate` 2013-01-31. A month file is not the same set as "games dated that month".
+Options: (a) `month` = month of the source file; (b) `month` = month of `UTCDate`, which would make one file write into two partitions.
+Decision: (a). `UTCDate` stays a column.
+Why: Each writer has to own exactly one partition for atomic overwrite (D-005). Under (b), rerunning 2013-02 would also have to rewrite 2013-01.
+Label: defensible. Fragile point: if a game ever appears in two adjacent files, per-month dedup won't catch it. Check once two adjacent months are in silver.
+Revisit if: gold needs exact calendar-month stats, in which case filter on `utc_date` in gold instead of moving partitions.
+
+## D-011 — Speed class from `TimeControl`, never from `Event`
+Date: 2026-11-13 · Phase: 0 · Status: Accepted
+Context: `Event` carries a speed label ("Rated Blitz game"), but Lichess's categories changed over time. In 2013-02, 39,385 of 41,939 "Classical" games are rapid by today's formula (base + 40 × increment).
+Options: (a) parse the label from `Event`; (b) compute `tc_bucket` from `TimeControl` with the current formula.
+Decision: (b).
+Why: One definition across all years, so 2013 and 2024 rating-band × speed cells are comparable. The label would mix today's rapid games into 2013 classical.
+Label: defensible.
+Revisit if: we want Lichess's historical labels as shown to users at the time, for example to match their own stats pages.
