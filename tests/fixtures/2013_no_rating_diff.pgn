@@ -1,0 +1,16 @@
+[Event "Rated Classical game"]
+[Site "https://lichess.org/i5elh7m6"]
+[White "YaserAhmady"]
+[Black "?"]
+[Result "1-0"]
+[UTCDate "2013.02.01"]
+[UTCTime "14:06:34"]
+[WhiteElo "1485"]
+[BlackElo "?"]
+[ECO "A00"]
+[Opening "Van Geet Opening"]
+[TimeControl "180+8"]
+[Termination "Time forfeit"]
+
+1. Nc3 b6 2. d4 Nf6 3. e4 g6 4. e5 g5 5. exf6 b5 6. Qe2 b4 7. Nb5 h6 8. Qe5 Rg8 9. Nxc7+ 1-0
+

@@ -1,0 +1,20 @@
+[Event "Rated Blitz tournament https://lichess.org/tournament/M00TxO8Z"]
+[Site "https://lichess.org/dKPz9R0T"]
+[Date "2024.01.01"]
+[Round "-"]
+[White "RoiRizo23"]
+[Black "Newgatevv"]
+[Result "1-0"]
+[UTCDate "2024.01.01"]
+[UTCTime "00:00:09"]
+[WhiteElo "1881"]
+[BlackElo "2249"]
+[WhiteRatingDiff "+13"]
+[BlackRatingDiff "-10"]
+[ECO "A40"]
+[Opening "Queen's Pawn Game"]
+[TimeControl "180+2"]
+[Termination "Abandoned"]
+
+1. d4 { [%clk 0:03:00] } 1-0
+

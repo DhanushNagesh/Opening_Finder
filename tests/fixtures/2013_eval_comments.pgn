@@ -1,0 +1,18 @@
+[Event "Rated Blitz tournament https://lichess.org/tournament/wpojsoyt"]
+[Site "https://lichess.org/vq7by3h2"]
+[White "Zanovis"]
+[Black "jacobhess"]
+[Result "1-0"]
+[UTCDate "2013.02.01"]
+[UTCTime "02:14:52"]
+[WhiteElo "1500"]
+[BlackElo "1500"]
+[WhiteRatingDiff "+162"]
+[BlackRatingDiff "-163"]
+[ECO "B00"]
+[Opening "Nimzowitsch Defense"]
+[TimeControl "300+2"]
+[Termination "Normal"]
+
+1. e4 { [%eval 0.12] } 1... Nc6 { [%eval 0.37] } 2. Nc3 { [%eval 0.25] } 2... Nd4 { [%eval 0.69] } 3. Nf3 { [%eval 0.63] } 3... Nc6?! { [%eval 1.48] } 4. d4 { [%eval 1.4] } 4... d5?! { [%eval 2.32] } 5. Nxd5?! { [%eval 1.68] } 5... Nb4?? { [%eval 5.24] } 6. Ne5?? { [%eval 1.84] } 6... Na6?? { [%eval 5.4] } 7. Qf3? { [%eval 4.08] } 7... Nf6?! { [%eval 4.98] } 8. Nxf6+? { [%eval 2.71] } 8... gxf6 { [%eval 3.13] } 9. Nxf7? { [%eval 1.54] } 9... Kxf7 { [%eval 1.45] } 10. Qh5+? { [%eval 0.39] } 10... Kg8 { [%eval 0.53] } 11. Bc4+ { [%eval 0.55] } 11... Kg7?? { [%eval #1] } 12. Qh6# 1-0
+

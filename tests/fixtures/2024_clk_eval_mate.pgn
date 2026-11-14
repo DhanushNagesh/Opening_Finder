@@ -1,0 +1,20 @@
+[Event "Rated Bullet game"]
+[Site "https://lichess.org/FqwXiMEE"]
+[Date "2024.01.01"]
+[Round "-"]
+[White "antoazzam"]
+[Black "miral_1993"]
+[Result "0-1"]
+[UTCDate "2024.01.01"]
+[UTCTime "00:00:10"]
+[WhiteElo "1793"]
+[BlackElo "1776"]
+[WhiteRatingDiff "-6"]
+[BlackRatingDiff "+6"]
+[ECO "C43"]
+[Opening "Russian Game: Modern Attack, Symmetrical Variation"]
+[TimeControl "60+0"]
+[Termination "Normal"]
+
+1. e4 { [%eval 0.2] [%clk 0:01:00] } 1... e5 { [%eval 0.17] [%clk 0:01:00] } 2. Nf3 { [%eval 0.29] [%clk 0:00:59] } 2... d5?! { [%eval 1.23] [%clk 0:01:00] } 3. d4?! { [%eval 0.38] [%clk 0:00:59] } 3... Nf6 { [%eval 0.62] [%clk 0:01:00] } 4. dxe5 { [%eval 0.28] [%clk 0:00:58] } 4... dxe4?? { [%eval 6.03] [%clk 0:01:00] } 5. exf6?? { [%eval 0.0] [%clk 0:00:57] } 5... Qxd1+ { [%eval 0.0] [%clk 0:00:59] } 6. Kxd1 { [%eval 0.0] [%clk 0:00:54] } 6... exf3 { [%eval 0.08] [%clk 0:00:59] } 7. gxf3 { [%eval -0.09] [%clk 0:00:53] } 7... gxf6 { [%eval 0.07] [%clk 0:00:57] } 8. Be3 { [%eval -0.34] [%clk 0:00:49] } 8... Be6 { [%eval -0.24] [%clk 0:00:57] } 9. Nc3 { [%eval -0.77] [%clk 0:00:49] } 9... Bd6? { [%eval 0.51] [%clk 0:00:57] } 10. Ke2?! { [%eval -0.37] [%clk 0:00:47] } 10... Nc6 { [%eval -0.4] [%clk 0:00:57] } 11. a3 { [%eval -0.92] [%clk 0:00:44] } 11... O-O-O { [%eval -0.82] [%clk 0:00:57] } 12. Rd1 { [%eval -0.96] [%clk 0:00:42] } 12... Bc4+ { [%eval -0.66] [%clk 0:00:57] } 13. Ke1 { [%eval -0.68] [%clk 0:00:40] } 13... Bxf1 { [%eval -0.58] [%clk 0:00:56] } 14. Kxf1 { [%eval -0.76] [%clk 0:00:38] } 14... Rhe8?! { [%eval 0.18] [%clk 0:00:56] } 15. Kg2?! { [%eval -0.54] [%clk 0:00:35] } 15... Ne5?! { [%eval 0.09] [%clk 0:00:54] } 16. Rhe1? { [%eval -2.61] [%clk 0:00:33] } 16... Rg8+ { [%eval -2.55] [%clk 0:00:53] } 17. Kf1? { [%eval -4.67] [%clk 0:00:32] } 17... Nxf3 { [%eval -4.67] [%clk 0:00:52] } 18. Re2?? { [%eval #-1] [%clk 0:00:31] } 18... Nxh2+ { [%eval #-2] [%clk 0:00:52] } 19. Ke1 { [%eval #-2] [%clk 0:00:30] } 19... Nf3+ { [%eval #-1] [%clk 0:00:52] } 20. Kf1 { [%eval #-1] [%clk 0:00:29] } 20... Rg1# { [%clk 0:00:51] } 0-1
+

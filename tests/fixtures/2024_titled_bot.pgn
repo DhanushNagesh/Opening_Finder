@@ -1,0 +1,21 @@
+[Event "Rated Classical game"]
+[Site "https://lichess.org/9aRLVJ1P"]
+[Date "2024.01.01"]
+[Round "-"]
+[White "SEMOVERLASPIEZAS"]
+[Black "Boris-Trapsky"]
+[Result "0-1"]
+[UTCDate "2024.01.01"]
+[UTCTime "00:00:10"]
+[WhiteElo "1479"]
+[BlackElo "2070"]
+[WhiteRatingDiff "-17"]
+[BlackRatingDiff "+1"]
+[BlackTitle "BOT"]
+[ECO "B20"]
+[Opening "Sicilian Defense"]
+[TimeControl "1800+0"]
+[Termination "Normal"]
+
+1. e4 { [%clk 0:30:00] } 1... c5 { [%clk 0:30:00] } 0-1
+

@@ -11,3 +11,5 @@ logs/
 .env
 PLAN.md
 CLAUDE.md
+
+!tests/fixtures/*.pgn
