@@ -165,3 +165,38 @@ Decision: `row_number()` with a fixed order. `repartition(ceil(rows / 500K), "ga
 Why: A fixed order makes the kept row deterministic, which the "reruns give the same aggregates" rule needs once duplicates actually show up (0 in 2013-02). The row count is already computed for the DQ check, so sizing files from it costs nothing. 2013-02 → 1 file of 23.6 MB instead of 200 tiny ones. `coalesce(1)` would put a 2024 month (~90M games) into one task and one huge file.
 Label: defensible. The 500K rows per file is a guess until phase 5 measures file size against read time. At 2013's ~190 bytes per silver row that's ~95 MB per file; 2024 rows with clocks are bigger.
 Revisit if: phase 5's file-size benchmark points to a different target.
+
+## D-018 — Airflow tasks run the pipeline CLIs in their own venv
+Date: 2026-11-14 · Phase: 3 · Status: Accepted
+Context: The Airflow image has its own pinned dependency tree (constraints file). The pipeline pins pyarrow, pyspark and zstandard in `uv.lock`.
+Options: (a) `pip install` the pipeline deps into Airflow's environment and call `lichess.bronze.run()` from a `@task`; (b) build a second venv from `uv.lock` in the image and have each task run `python -m lichess.bronze ...` as a subprocess.
+Decision: (b). Exit codes carry the retry decision: 0 done (JSON on stdout says written or skipped), 3 bad data (fail without retrying), anything else retry.
+Why: Tasks run the exact versions the tests ran, and an Airflow upgrade can't silently move pyarrow. The command in the task log is the same command in CLAUDE.md, so any failure reproduces outside Airflow with a copy-paste. The JVM also lives and dies with the subprocess instead of inside Airflow's task process.
+Label: defensible. Fragile point: results pass back by parsing the last JSON object on stdout; a library that prints a line starting with `{` after the summary would break that. Both CLIs print the summary last.
+Revisit if: we move to KubernetesExecutor or Docker-per-task, where the image is the isolation and the venv is redundant.
+
+## D-019 — A `months` param, not a monthly schedule with catchup
+Date: 2026-11-14 · Phase: 3 · Status: Accepted
+Context: Airflow's own backfill model ties one DAG run to one data interval (`@monthly`, `catchup=True`, logical date = month).
+Options: (a) `@monthly` + catchup; (b) `schedule=None` and a `months` list param, one mapped task group per month.
+Decision: (b), `max_active_runs=1`.
+Why: The unit of work is a source file, not a time window (D-010), and Lichess publishes each file days after the month ends, so a schedule would fire before the file exists. A list param makes "backfill 6 months" and "rerun one month" the same trigger call, and the grid shows all months of a backfill side by side. One run at a time, because two runs on the same month would race on the partition swap.
+Label: defensible. Cost: no automatic monthly runs. Adding a schedule later means a small sensor on `sha256sums.txt` listing the new file.
+Revisit if: the project needs to pick up new months unattended.
+
+## D-020 — Skip bronze when the checksum matches; silver always reruns
+Date: 2026-11-14 · Phase: 3 · Status: Accepted
+Context: PLAN phase 3 asks bronze to skip months already loaded unless `force=true`. Silver depends on bronze.
+Options: silver skips with bronze (default trigger rule) vs. silver runs whenever bronze didn't fail (`none_failed`).
+Decision: Bronze skips if `_stats.json` says `checksum_verified` and its SHA-256 equals the published one. Silver uses `none_failed`, so it rebuilds even when bronze was skipped. Bronze retries 3 times with exponential backoff (1 min → 30 min max) and `max_active_tis_per_dag=1`; silver retries once, also capped at 1. Exit code 3 fails either task without retrying.
+Why: The checksum is the identity of the input, so a match proves bronze is already built from those exact bytes. Silver is minutes against a 30 GB stream, and rerunning it means a hand-deleted or stale silver partition gets fixed by a normal run. One bronze at a time because two streams just split the bandwidth; one Spark job at a time because `local[*]` already uses every core and the Docker VM has 7.75 GB.
+Label: defensible. Fragile point: the skip trusts `_stats.json`; someone deleting a part file by hand leaves a "current" partition with missing rows. Silver's DQ check doesn't catch that (it compares to bronze), so run with `force=true` after any manual change.
+Revisit if: silver for a 2024 month gets slow enough that rerunning it every backfill hurts; then skip silver too, keyed on the bronze SHA-256.
+
+## D-021 — Local Airflow without login
+Date: 2026-11-14 · Phase: 3 · Status: Accepted
+Context: The official compose uses FAB auth and creates an `airflow`/`airflow` user.
+Decision: SimpleAuthManager with `SIMPLE_AUTH_MANAGER_ALL_ADMINS=true`, UI bound to `127.0.0.1:8080` only. Also dropped from the official file: Redis, Celery worker, Flower, triggerer.
+Why: Single-user laptop setup; a shared default password protects nothing that the localhost bind doesn't already. Fewer services also leave more of the 7.75 GB Docker VM for Spark.
+Label: defensible for local use only. Never run this compose on a host with a public port.
+Revisit if: Airflow ever runs anywhere but this laptop.
