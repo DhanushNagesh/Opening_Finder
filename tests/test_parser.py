@@ -334,3 +334,12 @@ def test_ply_count_matches_python_chess_on_500_games():
 
     assert len(reference) == 500
     assert [(g.game_id, g.ply_count) for g in ours] == reference
+
+
+def test_stats_lines_read_when_consumer_stops_early():
+    parser = PgnParser()
+    games = parser.iter_games(io.StringIO(pgn("aaaaaaaa") + pgn("bbbbbbbb")))
+    next(games)
+    games.close()
+    assert parser.stats.games_ok == 1
+    assert parser.stats.lines_read == 16

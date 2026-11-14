@@ -193,45 +193,48 @@ class PgnParser:
             return game
 
         lineno = 0
-        for raw in stream:
-            lineno += 1
-            line = raw.rstrip()
+        # finally: keeps lines_read right when the consumer stops early
+        try:
+            for raw in stream:
+                lineno += 1
+                line = raw.rstrip()
 
-            if not line:
-                if state == 3:
-                    if (game := finish()) is not None:
-                        yield game
-                    state = 0
-                elif state == 1:
-                    state = 2
-                continue
+                if not line:
+                    if state == 3:
+                        if (game := finish()) is not None:
+                            yield game
+                        state = 0
+                    elif state == 1:
+                        state = 2
+                    continue
 
-            m = _HEADER_RE.match(line) if line[0] == "[" else None
-            if m:
-                key = m.group(1)
-                # A header after movetext, after the post-header blank, or a repeated key
-                # means a new game started.
-                if state in (2, 3) or (state == 1 and key in headers):
-                    if (game := finish()) is not None:
-                        yield game
-                    state = 0
+                m = _HEADER_RE.match(line) if line[0] == "[" else None
+                if m:
+                    key = m.group(1)
+                    # A header after movetext, after the post-header blank, or a repeated key
+                    # means a new game started.
+                    if state in (2, 3) or (state == 1 and key in headers):
+                        if (game := finish()) is not None:
+                            yield game
+                        state = 0
+                    if state == 0:
+                        headers, move_lines, header_error = {}, [], None
+                        start_line = lineno
+                        state = 1
+                    value = m.group(2)
+                    headers[key] = _unescape(value) if "\\" in value else value
+                    continue
+
                 if state == 0:
-                    headers, move_lines, header_error = {}, [], None
-                    start_line = lineno
-                    state = 1
-                value = m.group(2)
-                headers[key] = _unescape(value) if "\\" in value else value
-                continue
+                    stats.stray_lines += 1
+                    continue
+                if state == 1 and line[0] == "[":
+                    header_error = header_error or f"bad_header_line:{lineno}"
+                    continue
+                move_lines.append(line)
+                state = 3
 
-            if state == 0:
-                stats.stray_lines += 1
-                continue
-            if state == 1 and line[0] == "[":
-                header_error = header_error or f"bad_header_line:{lineno}"
-                continue
-            move_lines.append(line)
-            state = 3
-
-        stats.lines_read = lineno
+        finally:
+            stats.lines_read = lineno
         if state != 0 and (game := finish()) is not None:
             yield game
