@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Lichess PGN dumps to Parquet, silver and gold tables for an opening finder"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "pyarrow==26.0.1",
     "zstandard==0.25.0",
 ]
 

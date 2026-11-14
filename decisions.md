@@ -120,3 +120,30 @@ Decision: (b). The 13 headers present in 100% of both phase 0 samples are requir
 Why: A truncated game has a correct header block, so under (a) it would land in bronze with a wrong `ply_count` and nobody would notice. Requiring the result token is a check that costs nothing, and schema drift shows up as a malformed count instead of a quiet rise in nulls.
 Label: defensible. Fragile point: if some untested year lacks one of the 13 headers (e.g. `Termination` in an early file), every game in that month is rejected. The behaviour is loud, which is what we want, but bronze must fail the month on a malformed-rate threshold, not silently write an empty partition (phase 2).
 Revisit if: a real month shows a header missing for a legitimate reason; then make that one header optional with an explicit null rule.
+
+## D-013 — Store time of day as a UTC timestamp, not a TIME column
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: The `Game` model has `utc_date` and `utc_time`. Parquet has no seconds-unit TIME or TIMESTAMP (PyArrow silently writes `time32[s]` as milliseconds), and Spark 3.5 can't read Parquet TIME columns at all.
+Options: (a) `utc_time` as a `"HH:MM:SS"` string; (b) seconds since midnight as an int; (c) `utc_datetime` as `timestamp[ms, UTC]` next to `utc_date`.
+Decision: (c). Bronze keeps `utc_date` (date32) and adds `utc_datetime`; there's no separate time column.
+Why: Every engine downstream (Spark, DuckDB, pandas) reads a Parquet timestamp natively, so nobody has to re-parse a string or remember what an int means. The date column is redundant, but it's what gold filters on and costs almost nothing in a dictionary-encoded column.
+Label: defensible.
+Revisit if: we move to Spark 4, which supports TIME, and have a reason to keep time of day without a date.
+
+## D-014 — Bronze guards: 0.1% malformed limit, 2× disk headroom, stdlib HTTP
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: D-012 says bronze must fail a month loudly instead of quietly writing a thin partition. The URL stream also needs a free-disk check before a big month starts (CLAUDE.md).
+Options: limits of 0 / 0.1% / 1%; disk headroom 1× / 1.5× / 2× the compressed size; `requests`/`httpx` or `urllib`.
+Decision: Fail the month if malformed games exceed 0.1% or if no valid games were parsed. Require free disk of 2× the source's Content-Length before streaming. Use `urllib.request`.
+Why: 2013-02 has 0 malformed games out of 123,961, so 0.1% (~124 games, or ~90K in a 2024 month) is far above normal and well below what a header change would cause (100% rejected). A limit of 0 would fail a whole 30 GB month over one odd game. Bronze came out 1.42× the compressed size for 2013-02, so 1.5× was too tight and 2× leaves room. `urllib` streams a response body as a file object, which is all we need, without adding a dependency.
+Label: defensible. Fragile points: a truncated stream on a small test file (one game cut of 500 = 0.2%) trips the limit, but on a real month the checksum is what catches truncation, not the limit. The 1.42× ratio was measured on 2013 only. 2024 games carry `[%clk]` on every move and may compress differently; re-measure in phase 5.
+Revisit if: a real month legitimately exceeds 0.1%, or phase 5 shows bronze is larger than 2× the source for 2024.
+
+## D-015 — No process pool for bronze yet
+Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Context: PLAN phase 2 task 2 says parallelise inside one file only once single-process speed is measured and is actually the bottleneck.
+Measured: 2013-02 bronze end to end is 2.5 s from a local file and 3.3 s from the URL (18.2 MB). Phase 1 put single-core parsing at ~12 MB/s compressed for 2024-style games, so a 30 GB month is ~41 min of parsing, and a 100 Mbit/s download needs ~40 min.
+Decision: Single process. The chunked process pool waits for phase 5, where a full 2024 month gives the real split between network time and parse time.
+Why: At 100 Mbit/s the download and the parser run at about the same speed, so a pool only helps on a faster link. Adding it before measuring means complexity you can't justify with a number.
+Label: defensible.
+Revisit if: phase 5 shows parse time clearly above download time for a 2024 month.
