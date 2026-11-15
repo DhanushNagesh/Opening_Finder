@@ -200,3 +200,12 @@ Decision: SimpleAuthManager with `SIMPLE_AUTH_MANAGER_ALL_ADMINS=true`, UI bound
 Why: Single-user laptop setup; a shared default password protects nothing that the localhost bind doesn't already. Fewer services also leave more of the 7.75 GB Docker VM for Spark.
 Label: defensible for local use only. Never run this compose on a host with a public port.
 Revisit if: Airflow ever runs anywhere but this laptop.
+
+## D-022 — Evals as a per-ply centipawn array in silver, mate as a ±10000 sentinel
+Date: 2026-11-14 · Phase: 4 · Status: Accepted
+Context: The blunder model needs the eval after every ply. PLAN says parse it in Spark, not SQL. Evals come as pawns (`0.12`) or mate (`#3`, `#-2`), and the last ply usually has none (1,278 of 4,195 analysed 2013 games).
+Options: (a) a Python UDF that walks the movetext; (b) one `regexp_extract_all` that matches "SAN move + optional `{comment}`", then `transform` each comment to an int; mate as (i) a separate array, (ii) a sentinel value, (iii) clamped already in silver.
+Decision: (b) with (ii). `evals_cp array<int>`, one element per ply, null for a ply without an eval, null for the whole column when `has_eval` is false. Mate is +10000 (White mates) or −10000. Silver fails the month if `size(evals_cp) != ply_count` for any analysed game.
+Why: Native Spark expressions avoid Python serialization on every row, which matters at 2024's ~8M analysed games per month. The length check compares this regex with the parser's independent ply count, so a misread movetext fails the job instead of shifting every eval one ply. Silver keeps the real centipawn values; how hard to cap is a metric choice, so it belongs in gold.
+Label: defensible. Fragile points: a comment before the first move (`{ intro } 1. e4`) would make the regex read words inside it as moves. None seen in either phase 0 sample, and the length check would fail the month if it showed up. The sentinel drops mate distance (`#1` and `#12` look the same), which the 300 cp blunder rule doesn't need.
+Revisit if: a later metric needs mate distance, or the length check ever fires.
