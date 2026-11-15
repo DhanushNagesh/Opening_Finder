@@ -1,0 +1,44 @@
+version: 2
+
+models:
+  - name: mart_best_openings
+    description: >
+      What the app reads. For each rating band, speed and colour, every opening line
+      with at least `min_games_best_openings` games, ranked by the 95% Wilson lower
+      bound on score, so a small sample with a high score doesn't outrank a large one.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [rating_band, tc_bucket, color, opening]
+      - unique_combination:
+          arguments:
+            columns: [rating_band, tc_bucket, color, rank]
+      - outcomes_sum_to_games
+    columns:
+      - name: rating_band
+        data_tests: [not_null]
+      - name: tc_bucket
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [ultrabullet, bullet, blitz, rapid, classical, correspondence]
+      - name: color
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [white, black]
+      - name: rank
+        description: 1 = highest Wilson lower bound in the slice.
+        data_tests: [not_null]
+      - name: opening
+        data_tests: [not_null]
+      - name: eco_codes
+        description: Comma-separated ECO codes seen with this opening name.
+      - name: games
+        data_tests: [not_null]
+      - name: score
+        data_tests: [between_0_and_1]
+      - name: score_wilson_lb
+        data_tests: [between_0_and_1]

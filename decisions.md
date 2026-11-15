@@ -218,3 +218,20 @@ Decision: Clamp every eval (mate sentinels included, D-022) to ±1000 cp, then c
 Why: A ±1000 cap means "lost/won" is one state, so going from +15 to +9 or from mate-in-3 to mate-in-5 isn't a blunder, while throwing away a winning position (+5 → −1) still is. Line grain would put 5 games in most cells, which is noise; families give cells of usable size.
 Label: defensible. Fragile points: inside the clamp, +12 → +4 counts as a 600 cp blunder even though the mover is still winning; the winning-chance curve Lichess itself uses doesn't have this problem and is the better rule if the metric ever matters. Dividing by all games makes late-phase rates depend on game length. Also, DuckDB's `greatest()`/`least()` ignore NULLs, so a naive clamp turned a missing final eval into −1000 and added 642 false White blunders. The `clamp` macro keeps NULLs, a dbt unit test pins it, and a Python recount matched (7,434 White, 7,345 Black).
 Revisit if: a 2024 month gives enough analysed games for line grain, or the app needs blunders that match Lichess's own `??` marks.
+
+## D-024 — `mart_best_openings`: N = 100 games, ranked per opening name across ECO codes
+Date: 2026-11-14 · Phase: 4 · Status: Accepted
+Context: PLAN asks for a minimum-games cutoff N chosen from the data. On 2013 H1 (957,657 games after stg filters), White openings per band × speed cell:
+
+| N | cells kept | share of games | band×speed slices left | worst-case Wilson half-width |
+|---|---|---|---|---|
+| 30 | 5,516 | 80.8% | 40 | ±0.18 |
+| 50 | 3,657 | 73.4% | 35 | ±0.14 |
+| 100 | 1,907 | 60.7% | 30 | ±0.10 |
+| 200 | 896 | 46.0% | 26 | ±0.07 |
+
+Separately, 94 opening names occur with more than one ECO code.
+Decision: N = 100, as the dbt var `min_games_best_openings`. The mart rolls `fct_opening_performance` up to `opening` (ECO codes listed in `eco_codes`) and ranks by Wilson lower bound, ties broken by games, then name.
+Why: The Wilson bound already handles sample size in the ranking; N exists so the app doesn't show lines whose interval is too wide to mean anything. ±0.10 is roughly the gap between a good and a bad opening at club level. At 1200 blitz it still leaves 26 White lines to rank. Users pick an opening by name, so splitting one name over two ECO rows would split its sample.
+Label: defensible. Fragile point: N is tuned to 6 months of 2013. A 2024 month has about 100× the games, so N = 100 would let thousands of thin lines in. Re-pick it (or tie it to slice size) once phase 5 loads 2024.
+Revisit if: phase 5 adds 2024 months, or the app wants family-level rankings too.
