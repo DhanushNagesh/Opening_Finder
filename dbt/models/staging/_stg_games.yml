@@ -1,0 +1,22 @@
+version: 2
+
+models:
+  - name: stg_games
+    description: Silver games filtered to rated, actually played games. One row per game.
+    columns:
+      - name: game_id
+        data_tests: [unique, not_null]
+      - name: month
+        data_tests: [not_null]
+      - name: rating_band
+        description: Average of both Elos floored to 100.
+        data_tests: [not_null]
+      - name: tc_bucket
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [ultrabullet, bullet, blitz, rapid, classical, correspondence]
+      - name: white_score
+        description: 1 / 0.5 / 0 from Result.
+        data_tests: [not_null]
