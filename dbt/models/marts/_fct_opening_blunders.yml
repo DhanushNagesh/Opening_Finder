@@ -1,0 +1,82 @@
+version: 2
+
+models:
+  - name: fct_opening_blunders
+    description: >
+      Blunders per game by opening family, rating band, speed and the colour that
+      blundered. Analysed games only (those with `[%eval]`): about 0.4% of 2013 games,
+      chosen by players asking for analysis, so it is a biased sample (D-008).
+      Blunder = eval drop of at least 300 cp for the mover, evals clamped to +/-1000 cp
+      (D-023). Per-game rates divide by all analysed games in the cell, including games
+      that ended before a phase was reached.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [opening_family, rating_band, tc_bucket, color]
+    columns:
+      - name: opening_family
+        data_tests: [not_null]
+      - name: rating_band
+        data_tests: [not_null]
+      - name: tc_bucket
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [ultrabullet, bullet, blitz, rapid, classical, correspondence]
+      - name: color
+        description: The side whose blunders are counted.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [white, black]
+      - name: games_with_eval
+        description: Analysed games in the cell. Show this next to every rate.
+        data_tests: [not_null]
+      - name: blunders
+        data_tests: [not_null]
+      - name: blunders_per_game
+        data_tests: [not_null]
+
+unit_tests:
+  - name: blunder_rule_on_hand_built_game
+    description: >
+      Ply 3 (White, move 2) drops 30 -> -300 cp: one White blunder in moves 1-10.
+      Ply 5 is a mate for White (sentinel 10000, clamped to 1000). Ply 7 has no eval;
+      it must be skipped, not clamped to -1000 (DuckDB's greatest() ignores NULL),
+      which would count a 2000 cp White blunder.
+    model: fct_opening_blunders
+    given:
+      - input: ref('stg_games')
+        rows:
+          - game_id: g1
+            opening_family: Test Opening
+            rating_band: 1200
+            tc_bucket: blitz
+            has_eval: true
+            evals_cp: "[20, 30, -300, -280, 10000, 10000, NULL]"
+          - game_id: g2
+            opening_family: Test Opening
+            rating_band: 1200
+            tc_bucket: blitz
+            has_eval: false
+            evals_cp: null
+    expect:
+      rows:
+        - opening_family: Test Opening
+          rating_band: 1200
+          tc_bucket: blitz
+          color: white
+          games_with_eval: 1
+          blunders: 1
+          blunders_per_game_moves_1_10: 1.0
+          blunders_per_game_moves_11_25: 0.0
+        - opening_family: Test Opening
+          rating_band: 1200
+          tc_bucket: blitz
+          color: black
+          games_with_eval: 1
+          blunders: 0
+          blunders_per_game_moves_1_10: 0.0
+          blunders_per_game_moves_11_25: 0.0

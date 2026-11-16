@@ -21,6 +21,12 @@ from pyspark.sql import functions as F
 # the file count from the row count instead; phase 5 measures the right target (D-017).
 ROWS_PER_FILE = 500_000
 EXIT_DATA_ERROR = 3
+# Mate scores have no centipawn value. Store them as +/- this sentinel (sign = side that
+# mates); gold clamps every eval well inside it before measuring swings (D-022).
+MATE_CP = 10_000
+# One match per SAN move plus the comment right after it, if any. SAN starts with a
+# letter; move numbers and result tokens start with a digit or `*`, so they never match.
+_MOVE_WITH_COMMENT = r"([A-Za-z][^\s{}()]*)(?:\s*\{([^}]*)\})?"
 
 
 class DataQualityError(RuntimeError):
@@ -62,6 +68,23 @@ def opening_family(opening: Column) -> Column:
     return F.regexp_replace(head, r"\s+#\d+$", "")
 
 
+def evals_cp(movetext: Column, has_eval: Column) -> Column:
+    """Eval after each ply in centipawns, one element per move; null where a move has no
+    eval. The whole column is null for games without any `[%eval]` (D-022)."""
+    comments = F.regexp_extract_all(movetext, F.lit(_MOVE_WITH_COMMENT), 2)
+
+    def to_cp(comment: Column) -> Column:
+        raw = F.regexp_extract(comment, r"\[%eval\s+(#?-?[0-9.]+)", 1)
+        return (
+            F.when(raw == "", F.lit(None).cast("int"))
+            .when(raw.startswith("#-"), -MATE_CP)
+            .when(raw.startswith("#"), MATE_CP)
+            .otherwise(F.round(raw.cast("double") * 100).cast("int"))
+        )
+
+    return F.when(has_eval, F.transform(comments, to_cp))
+
+
 def add_columns(bronze: DataFrame, month: str) -> DataFrame:
     avg_elo = (F.col("white_elo") + F.col("black_elo")) / 2
     return bronze.select(
@@ -78,6 +101,7 @@ def add_columns(bronze: DataFrame, month: str) -> DataFrame:
         ((F.col("termination") != "Abandoned") & (F.col("ply_count") >= 4)).alias(
             "is_decisive_play"
         ),
+        evals_cp(F.col("movetext"), F.col("has_eval")).alias("evals_cp"),
         F.lit(month).alias("month"),
     )
 
@@ -104,11 +128,17 @@ def check_quality(silver: DataFrame, expected_rows: int) -> dict[str, int]:
         F.sum(
             (F.col("tc_bucket").isNull() & (F.col("time_control") != "-")).cast("int")
         ).alias("null_tc_bucket"),
+        # The eval array is cut by a different regex than the parser's ply count, so a
+        # mismatch means one of them misreads some movetext and the evals are misaligned.
+        F.sum(
+            (F.col("has_eval") & (F.size("evals_cp") != F.col("ply_count"))).cast("int")
+        ).alias("eval_misaligned"),
     ).first()
-    rows, distinct_ids, null_tc = (
+    rows, distinct_ids, null_tc, misaligned = (
         row["rows"],
         row["distinct_ids"],
         row["null_tc_bucket"] or 0,
+        row["eval_misaligned"] or 0,
     )
     failures = []
     if rows != distinct_ids:
@@ -119,6 +149,8 @@ def check_quality(silver: DataFrame, expected_rows: int) -> dict[str, int]:
         )
     if null_tc:
         failures.append(f"{null_tc} non-correspondence games with null tc_bucket")
+    if misaligned:
+        failures.append(f"{misaligned} games where evals_cp length != ply_count")
     if failures:
         raise DataQualityError("; ".join(failures))
     return {"rows": rows, "distinct_ids": distinct_ids}

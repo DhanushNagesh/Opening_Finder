@@ -15,7 +15,6 @@ import os
 import subprocess
 from datetime import datetime, timedelta
 
-from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.sdk import Param, dag, get_current_context, task, task_group
 from airflow.sdk.exceptions import AirflowFailException, AirflowSkipException
 
@@ -23,24 +22,28 @@ log = logging.getLogger(__name__)
 
 PROJECT_DIR = "/opt/lichess"
 PYTHON = f"{PROJECT_DIR}/.venv/bin/python"
+DBT = f"{PROJECT_DIR}/.venv/bin/dbt"
 # Both CLIs exit 3 for bad input (malformed rate, DQ check). The source files are
 # immutable, so a retry would fail the same way after re-streaming the whole month.
 EXIT_DATA_ERROR = 3
 MONTH_PATTERN = r"^\d{4}-(0[1-9]|1[0-2])$"
 
 
-def run_cli(module: str, *args: str) -> dict:
-    """Run `python -m module args` in the pipeline venv; return the JSON it prints last."""
-    cmd = [PYTHON, "-m", module, *args]
+def _run(cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
     env = os.environ | {
         "PYTHONPATH": f"{PROJECT_DIR}/src",
         "SPARK_LOCAL_IP": "127.0.0.1",
     }
     log.info("running %s", " ".join(cmd))
-    # stderr (logging, Spark) is inherited so it streams into the task log as it runs.
-    proc = subprocess.run(
-        cmd, check=False, cwd=PROJECT_DIR, env=env, stdout=subprocess.PIPE, text=True
+    return subprocess.run(
+        cmd, check=False, cwd=PROJECT_DIR, env=env, text=True, **kwargs
     )
+
+
+def run_cli(module: str, *args: str) -> dict:
+    """Run `python -m module args` in the pipeline venv; return the JSON it prints last."""
+    # stderr (logging, Spark) is inherited so it streams into the task log as it runs.
+    proc = _run([PYTHON, "-m", module, *args], stdout=subprocess.PIPE)
     log.info("stdout:\n%s", proc.stdout)
     if proc.returncode == EXIT_DATA_ERROR:
         raise AirflowFailException(f"{module} rejected the data (exit 3), not retrying")
@@ -119,10 +122,27 @@ def lichess_pipeline():
 
         bronze(month) >> silver(month)
 
-    # Stub until phase 4 wires in `dbt build`.
-    dbt_build = EmptyOperator(task_id="dbt_build", trigger_rule="none_failed")
+    # Gold is rebuilt from all of silver, not per month: the tables are small and the
+    # Wilson ranks depend on every month at once. none_failed: runs when bronze skipped,
+    # never when any month failed, so gold never mixes old and half-new silver.
+    @task(trigger_rule="none_failed", retries=1, retry_delay=timedelta(minutes=1))
+    def dbt_build() -> None:
+        # dbt-duckdb doesn't create the database file's parent directory.
+        os.makedirs(f"{PROJECT_DIR}/data/gold", exist_ok=True)
+        proc = _run(
+            [DBT, "build", "--project-dir", "dbt", "--profiles-dir", "dbt"]
+            + ["--no-use-colors"]
+        )
+        # dbt exits 1 when a model or test fails (bad data or SQL: a retry gives the
+        # same answer) and 2 for an unhandled error such as a locked DuckDB file.
+        if proc.returncode == 1:
+            raise AirflowFailException(
+                "dbt build: a model or test failed, not retrying"
+            )
+        if proc.returncode != 0:
+            raise RuntimeError(f"dbt exited {proc.returncode}")
 
-    month_pipeline.expand(month=months()) >> dbt_build
+    month_pipeline.expand(month=months()) >> dbt_build()
 
 
 lichess_pipeline()

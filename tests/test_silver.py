@@ -252,3 +252,35 @@ def test_quality_check_fails_on_duplicate_ids(spark) -> None:
         df = add_columns(spark.read.parquet(f"{d}/month=2013-02"), "2013-02")
         with pytest.raises(DataQualityError, match="not unique"):
             check_quality(df, expected_rows=2)
+
+
+def test_evals_cp_aligned_per_ply(spark) -> None:
+    rows = [
+        bronze_row(
+            game_id="evalgame",
+            movetext=(
+                "1. e4 { [%eval 0.12] } 1... Nc6?! { [%eval 1.48] [%clk 0:01:00] } "
+                "2. Qh5 { [%eval -0.5] } 2... g6 { [%eval #3] } "
+                "3. Qxf7+ { [%eval #-2] } 3... Kxf7 1-0"
+            ),
+            ply_count=6,
+            has_eval=True,
+        ),
+        bronze_row(game_id="noevalgm"),
+    ]
+    out = silver_rows(spark, rows)
+    assert out[0]["evals_cp"] == [12, 148, -50, 10_000, -10_000, None]
+    assert out[1]["evals_cp"] is None
+
+
+def test_quality_check_fails_on_misaligned_evals(spark, tmp_path: Path) -> None:
+    from lichess.spark_jobs.silver_games import DataQualityError, run
+
+    bad = bronze_row(
+        movetext="1. e4 { [%eval 0.1] } 1... e5 { [%eval 0.2] } 1-0",
+        ply_count=3,
+        has_eval=True,
+    )
+    write_bronze(tmp_path / "b", "2013-02", [bad])
+    with pytest.raises(DataQualityError, match="evals_cp length"):
+        run(spark, "2013-02", tmp_path / "b", tmp_path / "s")

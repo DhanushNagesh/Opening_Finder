@@ -1,0 +1,16 @@
+version: 2
+
+sources:
+  - name: silver
+    description: Spark silver tables, one Parquet partition per source month (D-005, D-010).
+    tables:
+      - name: games
+        description: One row per game, deduped on game_id, with derived columns from silver_games.py.
+        config:
+          meta:
+            external_location: >-
+              read_parquet('{{ env_var('LICHESS_DATA_DIR', 'data') }}/silver/games/month=*/*.parquet',
+              hive_partitioning = true)
+        columns:
+          - name: game_id
+            data_tests: [unique, not_null]

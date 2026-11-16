@@ -1,0 +1,44 @@
+version: 2
+
+models:
+  - name: fct_opening_performance
+    description: >
+      Results by opening line, rating band, speed and colour, from the point of view of
+      `color`. Built from stg_games, so abandoned, sub-2-move and unrated games are out.
+    data_tests:
+      - unique_combination:
+          arguments:
+            columns: [opening_family, opening, eco, rating_band, tc_bucket, color]
+      - outcomes_sum_to_games
+    columns:
+      - name: opening_family
+        data_tests: [not_null]
+      - name: opening
+        data_tests: [not_null]
+      - name: eco
+        data_tests: [not_null]
+      - name: rating_band
+        description: Average of both Elos floored to 100; 1200 means 1200-1299.
+        data_tests: [not_null]
+      - name: tc_bucket
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [ultrabullet, bullet, blitz, rapid, classical, correspondence]
+      - name: color
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [white, black]
+      - name: games
+        data_tests: [not_null]
+      - name: score
+        description: Mean points per game for `color` (win 1, draw 0.5, loss 0).
+        data_tests: [between_0_and_1]
+      - name: score_wilson_lb
+        description: 95% Wilson lower bound on score (D-007).
+        data_tests: [between_0_and_1]
+      - name: avg_ply
+        description: Mean half-moves per game.

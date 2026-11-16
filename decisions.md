@@ -200,3 +200,38 @@ Decision: SimpleAuthManager with `SIMPLE_AUTH_MANAGER_ALL_ADMINS=true`, UI bound
 Why: Single-user laptop setup; a shared default password protects nothing that the localhost bind doesn't already. Fewer services also leave more of the 7.75 GB Docker VM for Spark.
 Label: defensible for local use only. Never run this compose on a host with a public port.
 Revisit if: Airflow ever runs anywhere but this laptop.
+
+## D-022 — Evals as a per-ply centipawn array in silver, mate as a ±10000 sentinel
+Date: 2026-11-14 · Phase: 4 · Status: Accepted
+Context: The blunder model needs the eval after every ply. PLAN says parse it in Spark, not SQL. Evals come as pawns (`0.12`) or mate (`#3`, `#-2`), and the last ply usually has none (1,278 of 4,195 analysed 2013 games).
+Options: (a) a Python UDF that walks the movetext; (b) one `regexp_extract_all` that matches "SAN move + optional `{comment}`", then `transform` each comment to an int; mate as (i) a separate array, (ii) a sentinel value, (iii) clamped already in silver.
+Decision: (b) with (ii). `evals_cp array<int>`, one element per ply, null for a ply without an eval, null for the whole column when `has_eval` is false. Mate is +10000 (White mates) or −10000. Silver fails the month if `size(evals_cp) != ply_count` for any analysed game.
+Why: Native Spark expressions avoid Python serialization on every row, which matters at 2024's ~8M analysed games per month. The length check compares this regex with the parser's independent ply count, so a misread movetext fails the job instead of shifting every eval one ply. Silver keeps the real centipawn values; how hard to cap is a metric choice, so it belongs in gold.
+Label: defensible. Fragile points: a comment before the first move (`{ intro } 1. e4`) would make the regex read words inside it as moves. None seen in either phase 0 sample, and the length check would fail the month if it showed up. The sentinel drops mate distance (`#1` and `#12` look the same), which the 300 cp blunder rule doesn't need.
+Revisit if: a later metric needs mate distance, or the length check ever fires.
+
+## D-023 — Blunder rule: 300 cp drop for the mover, evals clamped to ±1000, family grain
+Date: 2026-11-14 · Phase: 4 · Status: Accepted
+Context: PLAN defines a blunder as an eval swing of ≥300 cp against the side that moved, with mate capped. 2013 H1 has only 4,194 analysed games (69 at 1200–1299) spread over 864 opening lines.
+Options: cap at ±1000 / ±2000 / Lichess's winning-chance curve; grain at opening line or at `opening_family`.
+Decision: Clamp every eval (mate sentinels included, D-022) to ±1000 cp, then count a blunder when the mover's eval drops by ≥300. Ply 1 and any ply where either side's eval is missing are skipped. Grain: `opening_family × rating_band × tc_bucket × color`, where `color` is the side that blundered. Phases by full-move number: 1–10, 11–25, 26+. Per-game rates divide by every analysed game in the cell.
+Why: A ±1000 cap means "lost/won" is one state, so going from +15 to +9 or from mate-in-3 to mate-in-5 isn't a blunder, while throwing away a winning position (+5 → −1) still is. Line grain would put 5 games in most cells, which is noise; families give cells of usable size.
+Label: defensible. Fragile points: inside the clamp, +12 → +4 counts as a 600 cp blunder even though the mover is still winning; the winning-chance curve Lichess itself uses doesn't have this problem and is the better rule if the metric ever matters. Dividing by all games makes late-phase rates depend on game length. Also, DuckDB's `greatest()`/`least()` ignore NULLs, so a naive clamp turned a missing final eval into −1000 and added 642 false White blunders. The `clamp` macro keeps NULLs, a dbt unit test pins it, and a Python recount matched (7,434 White, 7,345 Black).
+Revisit if: a 2024 month gives enough analysed games for line grain, or the app needs blunders that match Lichess's own `??` marks.
+
+## D-024 — `mart_best_openings`: N = 100 games, ranked per opening name across ECO codes
+Date: 2026-11-14 · Phase: 4 · Status: Accepted
+Context: PLAN asks for a minimum-games cutoff N chosen from the data. On 2013 H1 (957,657 games after stg filters), White openings per band × speed cell:
+
+| N | cells kept | share of games | band×speed slices left | worst-case Wilson half-width |
+|---|---|---|---|---|
+| 30 | 5,516 | 80.8% | 40 | ±0.18 |
+| 50 | 3,657 | 73.4% | 35 | ±0.14 |
+| 100 | 1,907 | 60.7% | 30 | ±0.10 |
+| 200 | 896 | 46.0% | 26 | ±0.07 |
+
+Separately, 94 opening names occur with more than one ECO code.
+Decision: N = 100, as the dbt var `min_games_best_openings`. The mart rolls `fct_opening_performance` up to `opening` (ECO codes listed in `eco_codes`) and ranks by Wilson lower bound, ties broken by games, then name.
+Why: The Wilson bound already handles sample size in the ranking; N exists so the app doesn't show lines whose interval is too wide to mean anything. ±0.10 is roughly the gap between a good and a bad opening at club level. At 1200 blitz it still leaves 26 White lines to rank. Users pick an opening by name, so splitting one name over two ECO rows would split its sample.
+Label: defensible. Fragile point: N is tuned to 6 months of 2013. A 2024 month has about 100× the games, so N = 100 would let thousands of thin lines in. Re-pick it (or tie it to slice size) once phase 5 loads 2024.
+Revisit if: phase 5 adds 2024 months, or the app wants family-level rankings too.
