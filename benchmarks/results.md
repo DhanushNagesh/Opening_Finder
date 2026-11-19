@@ -90,3 +90,37 @@ Every run's result fingerprint (cells, side-games, wins, draws, Σ Wilson bound)
 | 2024-09: ~88M rows, ~4 GB | — | pending: silver for this month lands after the stream finishes | | | |
 
 Takeaway so far: at 2013 sizes DuckDB wins 8–11× on a warm query and about 40× on what a dbt run actually pays (start + first query: 0.08 s vs. 2.9–4.5 s). Spark's cost here is fixed per-query overhead (planning, task scheduling, the shuffle stage), not throughput. Going from 1 to 6 months, 8× the rows, Spark's warm time only grows 2.1–2.5× while DuckDB's grows 2.3×, so neither is anywhere near its limit. Tuning shuffle partitions to the core count trims Spark by 18–30% and doesn't change the verdict. The 2024-09 row is the real scale test: 88M rows, roughly 90× 2013 H1, still on one machine.
+
+## File sizing: many tiny Parquet files vs. a few large ones (phase 5, task 4)
+
+Same machine (Apple M4, 10 cores, 16 GB). Date: 2026-11-18. Script: `benchmarks/file_sizing.py --source data/bronze/month=2013-0{1..6} --files 5000 1000 100 10 1 --repeat 3`. Input: 2013 H1 bronze, 966,028 rows, 201 MB in 6 files. Bronze is used instead of silver because it keeps `movetext`, which makes it big enough (180 MB) to fill one ~128–256 MB file. Silver H1 is only 33 MB.
+
+Method:
+- Spark 3.5.9 (`local[*]`, zstd, default 128 MB Parquet block size) writes the cached rows once per layout with `repartition(n)`. Every layout pays the same shuffle and gets exactly n files.
+- Each layout is read back by Spark and DuckDB 2.0.0 with two queries:
+  - narrow: `group by eco`, `count(*)`, `sum(ply_count)`.
+  - full: `sum(length(movetext))` plus two counts, so every byte of the widest column is decoded.
+- Each read builds a fresh DataFrame / `read_parquet`, so listing files and reading footers are inside the timing. The table shows the best of 3.
+- Results were identical in every layout and in both engines (966,028 rows, 401,187,084 movetext chars).
+- The OS page cache was warm for all layouts, so this measures per-file overhead, not disk speed.
+- The 2024-09 bronze stream was running at the same time.
+
+| Files | Median file | Total on disk | Spark write | Spark read tasks | Spark narrow | Spark full | DuckDB narrow | DuckDB full |
+|---|---|---|---|---|---|---|---|---|
+| 5,000 | 52 KB | 259.8 MB (+44%) | 30.59 s | 157 | 3.089 s | 1.409 s | 0.291 s | 0.347 s |
+| 1,000 | 211 KB | 211.3 MB (+17%) | 7.68 s | 33 | 0.680 s | 0.746 s | 0.069 s | 0.145 s |
+| 100 | 1.9 MB | 191.9 MB (+7%) | 3.04 s | 10 | 0.214 s | 0.419 s | 0.021 s | 0.124 s |
+| 10 | 18.5 MB | 185.5 MB (+3%) | 2.48 s | 10 | 0.285 s | 0.378 s | 0.014 s | 0.103 s |
+| 1 | 180 MB, 2 row groups | 180.0 MB | 4.72 s | 10 (2 do work) | 0.368 s | 1.659 s | 0.018 s | 0.352 s |
+| 2024-09 silver, ~4 GB | — | pending: rerun on silver once the stream finishes | | | | | | |
+
+Takeaway:
+- Tiny files are expensive on every axis. At 5,000 files of 52 KB:
+  - Spark's write is 12× slower than at 10 files (one task and one file commit per file).
+  - The same rows take 44% more disk, because every file repeats its footer, schema and dictionaries.
+  - Spark's narrow query is 11× slower and DuckDB's is 21× slower, because opening a file and reading its footer costs more than the actual work.
+- Spark hides some of this: `openCostInBytes` (4 MB) packs small files into fewer read tasks (5,000 files → 157 tasks). The per-file open cost stays.
+- The other extreme also loses, for a less obvious reason: parallelism comes from row groups, not files. The single 180 MB file has 2 row groups, because Spark's default Parquet block is 128 MB. So only 2 of 10 cores decode the wide column. Its full scan is 4.4× slower in Spark and 3.4× slower in DuckDB than the 10-file layout. Its write is single-task, about 2× slower.
+- The sweet spot is enough files or row groups to keep every core busy, each well above ~1 MB. At this size that's 10–100 files.
+- At 2024 scale this is silver's current rule: `ROWS_PER_FILE = 2.5M` gives ~115 MB files, one row group each, about 35 files per month (D-026). That's ≥3 row groups per core, with per-file overhead well under 1%.
+- Defensible: Spark's default after a shuffle is 200 files per month (`spark.sql.shuffle.partitions`). For a 2013 month that's 200 files of ~20 KB, the top row of this table. That's why silver sizes its output explicitly instead.
