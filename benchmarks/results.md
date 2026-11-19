@@ -38,3 +38,18 @@ Same machine as above. Date: 2026-11-13. Single runs; Spark is `local[*]` on a 1
 | silver (Spark) | bronze 2013-02 | 123,961 | 5.05 | 1 file, 23.6 MB (zstd Parquet) |
 
 Bronze from the URL adds ~0.9 s of network time to ~2.5 s of parsing for this month, so the parser is still the larger cost at 2013 sizes. Silver time is mostly JVM start-up and fixed Spark overhead at this size; it's not a throughput number. Phase 5 measures a 2024 month.
+
+## Silver temp disk on a 2024 sample (phase 5, before scaling)
+
+Same machine. Date: 2026-11-18. Input: first 100 MB of `lichess_db_standard_rated_2024-09.pgn.zst` (`curl -r 0-99999999`), 308,422 games, bronze 143.8 MB in 2 files. Spark `local[*]`, 4 GB driver. Peak = largest `du -sk` of `SPARK_LOCAL_DIRS`, sampled every 0.1 s while the job ran. Single runs (the new version twice).
+
+| Silver version | Peak Spark temp | × compressed input | Runtime | Silver output |
+|---|---|---|---|---|
+| Window dedup + `repartition` + `.cache()` (D-017) | 547 MB | 5.5× | 11.7 s | 146 MB |
+| same, `.cache()` removed | 798 MB | 8.0× | 9.3 s | 146 MB |
+| same, `spark.io.compression.codec=zstd` | 336 MB | 3.4× | 12.2 s | 146 MB |
+| **id-only dedup + coalesce + staged checks (D-025)** | **10.6 MB** | **0.1×** | **8.9–9.5 s** | 146 MB |
+
+Where the bytes are (Parquet column chunks, zstd): `movetext` is 92% of bronze (131.7 of 143.8 MB) and 90% of silver. Silver without `movetext` is 14.3 MB. Stripping clock-only comments from `movetext` takes it from 131.7 to 77.7 MB.
+
+The old job shuffled every column twice, and lz4 shuffle files of clock-heavy movetext are several times the zstd input. Scaled linearly to the full 28.6 GB month, the old job needed ~156 GB of temp next to ~41 GB bronze and ~42 GB silver, more than the 129 GB free. The new one needs ~3 GB of temp, so the month fits at a projected ~86 GB peak. That's a projection from the sample; the full-month run in this phase measures the real number.
