@@ -2,14 +2,17 @@
 
     JAVA_HOME=/opt/homebrew/opt/openjdk@17 uv run python -m lichess.spark_jobs.silver_games --month 2013-02
 
-Writes `silver_root/month=YYYY-MM/` with dynamic partition overwrite, so only that
-month is replaced (D-005). Exit code 3 means a data-quality failure, which a retry
+Writes the month to a staging dir, runs the checks on the written files, then swaps
+it into `silver_root/month=YYYY-MM/`, so only that month is replaced and a failed check
+leaves the old partition in place (D-005, D-025). Exit code 3 means a data-quality failure, which a retry
 won't fix; any other non-zero exit (JVM crash, OOM) may be worth retrying.
 """
 
 import argparse
 import json
 import math
+import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -17,8 +20,10 @@ from pathlib import Path
 from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
-# Spark's default 200 shuffle partitions gave 200 files of ~200 KB for 2013-02. Size
-# the file count from the row count instead; phase 5 measures the right target (D-017).
+from lichess.bronze import swap_in
+
+# Target rows per silver file. coalesce can only merge input splits, so a file is at
+# most this big and at least one bronze split (D-017, D-025).
 ROWS_PER_FILE = 500_000
 EXIT_DATA_ERROR = 3
 # Mate scores have no centipawn value. Store them as +/- this sentinel (sign = side that
@@ -40,7 +45,6 @@ def spark_session(
         SparkSession.builder.master(master)
         .appName(app_name)
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .config("spark.sql.parquet.compression.codec", "zstd")
         .config("spark.ui.showConsoleProgress", "false")
         .config("spark.driver.memory", "4g")
@@ -107,14 +111,28 @@ def add_columns(bronze: DataFrame, month: str) -> DataFrame:
 
 
 def dedup(df: DataFrame) -> DataFrame:
+    """Drop null ids and keep one row per game_id, shuffling only the id column.
+
+    A window over all rows would shuffle every column, movetext included: 5.5x the
+    compressed input in Spark temp files on a 2024 sample (D-025). Instead, find the
+    duplicated ids from the id column alone, pass unique rows through untouched, and run
+    the window only on the duplicated rows.
+    """
+    df = df.where(F.col("game_id").isNotNull())
+    # Broadcast: duplicates are rare (none in 2013 H1), so this list is tiny.
+    dup_ids = F.broadcast(
+        df.groupBy("game_id").count().where("count > 1").select("game_id")
+    )
+    unique = df.join(dup_ids, "game_id", "left_anti")
     # Deterministic winner so a rerun keeps the same row when duplicates differ.
     w = Window.partitionBy("game_id").orderBy("utc_datetime", "movetext")
-    return (
-        df.where(F.col("game_id").isNotNull())
+    winners = (
+        df.join(dup_ids, "game_id", "left_semi")
         .withColumn("_rn", F.row_number().over(w))
         .where("_rn = 1")
         .drop("_rn")
     )
+    return unique.unionByName(winners)
 
 
 def build_silver(bronze: DataFrame, month: str) -> DataFrame:
@@ -172,19 +190,33 @@ def run(spark: SparkSession, month: str, bronze_root: Path, silver_root: Path) -
     ).first()
     bronze_rows, null_ids, expected = b["rows"], b["null_ids"] or 0, b["distinct_ids"]
 
+    # Staging sits next to silver_root, not inside it, so readers globbing silver never
+    # see it; same filesystem, so the swap is two renames.
+    tmp = (
+        silver_root.parent
+        / f"_staging_{silver_root.name}"
+        / f"month={month}-{os.getpid()}"
+    )
+    shutil.rmtree(tmp, ignore_errors=True)
     files = max(1, math.ceil(expected / ROWS_PER_FILE))
-    silver = build_silver(bronze, month).repartition(files, "game_id").cache()
     try:
-        check_quality(silver, expected)
-        silver.write.mode("overwrite").partitionBy("month").parquet(str(silver_root))
-    finally:
-        silver.unpersist()
-
-    written = spark.read.parquet(str(silver_root / f"month={month}")).count()
-    if written != expected:
-        raise DataQualityError(
-            f"read back {written} rows from silver, expected {expected}"
+        # coalesce merges input splits without a shuffle, so file size costs no temp
+        # disk. Checks run on what was written rather than on a cached frame.
+        build_silver(bronze, month).drop("month").coalesce(files).write.parquet(
+            str(tmp)
         )
+        quality = check_quality(spark.read.parquet(str(tmp)), expected)
+        files = len(list(tmp.glob("*.parquet")))
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    silver_root.mkdir(parents=True, exist_ok=True)
+    swap_in(tmp, silver_root / f"month={month}")
+    try:
+        tmp.parent.rmdir()
+    except OSError:  # another month's staging dir is still there
+        pass
+    written = quality["rows"]
 
     return {
         "month": month,

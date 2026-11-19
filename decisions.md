@@ -158,7 +158,7 @@ Label: defensible. Fragile point: names written with a comma and no colon (`King
 Revisit if: a 2024 month shows many comma-only names, or gold needs families that match ECO groupings.
 
 ## D-017 — Silver: dedup keeps the earliest row; file count sized from row count
-Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Date: 2026-11-13 · Phase: 2 · Status: Superseded in part by D-025 (how dedup and file sizing run; the earliest-row rule stands)
 Context: `dropDuplicates` keeps an arbitrary row when duplicates differ, so two runs could keep different rows. Separately, Spark's default 200 shuffle partitions wrote 200 files of ~200 KB for a 124K-row month (AQE doesn't merge them once the frame is cached).
 Options: dedup with `dropDuplicates` vs. `row_number()` over `game_id` ordered by `utc_datetime, movetext`. Files: default partitions, `coalesce(1)`, or `repartition(ceil(rows / 500K), game_id)`.
 Decision: `row_number()` with a fixed order. `repartition(ceil(rows / 500K), "game_id")`, written as zstd Parquet (Spark's default is snappy; bronze is already zstd).
@@ -235,3 +235,12 @@ Decision: N = 100, as the dbt var `min_games_best_openings`. The mart rolls `fct
 Why: The Wilson bound already handles sample size in the ranking; N exists so the app doesn't show lines whose interval is too wide to mean anything. ±0.10 is roughly the gap between a good and a bad opening at club level. At 1200 blitz it still leaves 26 White lines to rank. Users pick an opening by name, so splitting one name over two ECO rows would split its sample.
 Label: defensible. Fragile point: N is tuned to 6 months of 2013. A 2024 month has about 100× the games, so N = 100 would let thousands of thin lines in. Re-pick it (or tie it to slice size) once phase 5 loads 2024.
 Revisit if: phase 5 adds 2024 months, or the app wants family-level rankings too.
+
+## D-025 — Silver dedup shuffles only `game_id`; checks run on staged output, no cache
+Date: 2026-11-18 · Phase: 5 · Status: Accepted
+Context: Before streaming a 2024 month, silver ran on the first 100 MB of 2024-09 (308K games). Spark's temp dir peaked at 547 MB, 5.5x the compressed input, because the dedup window and `repartition(files, "game_id")` each shuffled every column, and `movetext` with `[%clk]` on every move is 92% of the bytes. Scaled to the 28.6 GB month: ~156 GB of shuffle files on top of ~41 GB bronze and ~42 GB silver, against 129 GB free. Dropping `.cache()` alone made it worse (798 MB): the cache wasn't the problem, the shuffles were.
+Options: (a) zstd shuffle codec (measured 336 MB, still ~96 GB for the month); (b) one shuffle instead of two (estimated ~half); (c) find duplicate ids from the id column only, broadcast that list, pass unique rows through with no shuffle, window only the duplicated rows.
+Decision: (c). File sizing uses `coalesce(ceil(rows / 500K))`, which merges input splits without a shuffle. No `.cache()`: the month is written to `data/silver/_staging_games/`, the DQ checks run on the written files, then the partition is swapped in with the same two-rename swap as bronze. Dynamic partition overwrite is gone.
+Why: Measured on the same sample: Spark temp 547 MB → 10.6 MB (0.1x input), runtime 11.7 s → 9.5 s. 2013 H1 silver and every gold table came out identical (row counts, fingerprints, mart ranking hash). Checking the written files is also stricter than checking a cached frame, and a failed check still leaves the old partition untouched.
+Label: defensible. Fragile points: the broadcast assumes few duplicates; a month where millions of ids repeat (a botched Lichess re-export) would broadcast a big list, and the driver's 4 GB is the limit. `coalesce` can only merge splits, never split them, so a silver file is never smaller than one bronze input split and can't be tuned below that. A rerun briefly holds the old and new partition at once (the swap), so it needs one extra month of silver free.
+Revisit if: a month shows a real duplicate rate, or phase 5's file-size benchmark wants files that differ from the bronze file layout.

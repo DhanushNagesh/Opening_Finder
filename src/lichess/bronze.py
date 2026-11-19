@@ -262,11 +262,11 @@ def write_partition(
         shutil.rmtree(tmp, ignore_errors=True)
         raise
 
-    _swap_in(tmp, final)
+    swap_in(tmp, final)
     return result
 
 
-def _swap_in(tmp: Path, final: Path) -> None:
+def swap_in(tmp: Path, final: Path) -> None:
     """Replace `final` with `tmp`. POSIX can't rename onto a non-empty dir, so move the
     old one aside first; the gap between the two renames is the only window in which
     the partition is missing."""
