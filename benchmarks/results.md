@@ -72,3 +72,21 @@ The parent process decompresses, splits lines and cuts chunks of 20K games at `[
 Where the parent's time goes on the 2024 sample, timed separately: decompress + split + chunk 1.54 s (65 MB/s), pickling chunk text to send 0.96 s, unpickling the returned `Game` lists 1.36 s (2,170 pickled bytes per game).
 
 Takeaway: the pool tops out at 4 workers, at 1.5× when `Game` objects come back to one writer and 2.3× when they don't. The ceiling is the single parent: decompressing, chunking and pickling run serially in one process, and shipping parsed games back costs nearly as much as parsing them did. For loading months it doesn't matter. The same 2024-09 file streams from database.lichess.org at ~2.1 MB/s on this connection, so even the single-process parser (11.3 MB/s) is idle ~80% of the time. Bronze stays single-process (D-027). The pool would pay off only with a local copy of the file or a ≥100 Mbit/s link, and then only if each worker wrote its own Parquet files.
+
+## Engine: gold aggregation in DuckDB vs. Spark local[*] (phase 5, task 3)
+
+Same machine (Apple M4, 10 cores, 16 GB). Date: 2026-11-18. Script: `benchmarks/engine_compare.py --engine {duckdb,spark} --months ... --repeat 5`, one engine per process. The query is `fct_opening_performance` (with `stg_games`' filter and the Wilson macro inlined), the same SQL text in both engines. DuckDB materialises it into a temp table and Spark writes it to the `noop` sink, so neither ships rows to Python. DuckDB 2.0.0 with 10 threads; Spark 3.5.9 `local[*]` (10 cores), 4 GB driver, AQE on. The 2024-09 bronze stream was running at the same time (about a quarter of one core).
+
+Every run's result fingerprint (cells, side-games, wins, draws, Σ Wilson bound) was identical across both engines, and at 6 months it matched dbt's `fct_opening_performance`: 83,788 cells, 1,915,314 side-games.
+
+| Silver input | Engine | Engine start | First query | Best warm query (of 4) | DuckDB faster by (warm) |
+|---|---|---|---|---|---|
+| 2013-02: 123,961 rows, 4.2 MB | DuckDB | 0.02–0.06 s | 0.053 s | 0.026 s | — |
+| | Spark, 200 shuffle partitions (default) | 1.53 s | 1.41 s | 0.265 s | 10× |
+| | Spark, 10 shuffle partitions | 1.31 s | 1.36 s | 0.218 s | 8× |
+| 2013 H1: 966,028 rows, 32.8 MB | DuckDB | 0.01 s | 0.062 s | 0.060 s | — |
+| | Spark, 200 shuffle partitions (default) | 1.17 s | 3.31 s | 0.668 s | 11× |
+| | Spark, 10 shuffle partitions | 1.06 s | 2.43 s | 0.468 s | 8× |
+| 2024-09: ~88M rows, ~4 GB | — | pending: silver for this month lands after the stream finishes | | | |
+
+Takeaway so far: at 2013 sizes DuckDB wins 8–11× on a warm query and about 40× on what a dbt run actually pays (start + first query: 0.08 s vs. 2.9–4.5 s). Spark's cost here is fixed per-query overhead (planning, task scheduling, the shuffle stage), not throughput. Going from 1 to 6 months, 8× the rows, Spark's warm time only grows 2.1–2.5× while DuckDB's grows 2.3×, so neither is anywhere near its limit. Tuning shuffle partitions to the core count trims Spark by 18–30% and doesn't change the verdict. The 2024-09 row is the real scale test: 88M rows, roughly 90× 2013 H1, still on one machine.
