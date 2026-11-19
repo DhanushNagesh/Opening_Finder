@@ -226,4 +226,30 @@ What happened:
 - **The right fix for this join is not a skew fix at all.** The lookup is 287 rows, so broadcast it. Then the big side never shuffles, and this is the fastest variant (1.38 s, −43%). Spark would do that by default, since `autoBroadcastJoinThreshold` is 10 MB.
 - Before/after for the resume line: longest join task 1,198 ms → 524 ms (AQE skew join) → 266 ms (salting). Wall time 2.43 s → 1.38 s (broadcast).
 
-| 2024-09 silver, ~88M rows (no replication) | pending: rerun once that month's silver lands | | | | |
+### Rerun on real 2024-09 silver (no replication)
+
+Date: 2026-11-18, after the stream had finished. Command: `benchmarks/skew.py --months 2024-09 --replicate 1`.
+- Rows: 87,549,731 with a non-null `opening_family`, across 147 families. Sicilian Defense is 9.97%.
+- The group-by and window ran in one process with `--repeat 3`. Each join variant then ran in its own process with `--repeat 2`. Running the joins in the same JVM straight after the window ran the 4 GB driver out of heap; each one alone did not.
+- `join_aqe_skew_defaults` is new in this run: the skew-join rule on, at Spark's default thresholds.
+
+| Variant | Wall | Tasks | Shuffle per task: max / median | Task time: max / median | Σ task time |
+|---|---|---|---|---|---|
+| group-by | 1.50 s | 200 | 144 / 36 records | 11 / 2 ms | 0.4 s |
+| window over family | 32.07 s | 200 | 8,725,579 / 679 records (151.2 MB / 16 KB) | 20,742 / 8.5 ms | 201.8 s |
+| join, sort-merge, no fix | 17.93 s | 200 | 8,725,580 / 680 records (151.2 MB / 16 KB) | 9,249 / 8 ms | 93.5 s |
+| join + AQE skew join, default thresholds (256 MB / 64 MB) | 19.40 s | 200 | 8,725,580 / 680 records (151.2 MB) | 8,819 / 7.5 ms | 86.8 s |
+| join + AQE skew join, lookup is a cached group-by output (8 MB / 2 MB) | 16.31 s | 200 | 8,725,579 / 679 records | 7,573 / 6 ms | 73.4 s |
+| **join + AQE skew join (8 MB / 2 MB)** | **10.96 s (−39%)** | 834 | 460,109 / 96,963 records (8.0 / 1.7 MB) | **465** / 52 ms | 51.7 s |
+| join, salted into 16 buckets | 24.99 s | 200 | 1,457,694 / 393,818 records (31.8 / 9.5 MB) | 2,447 / 456 ms | 115.2 s |
+| **join, lookup broadcast** | **6.08 s (−66%)** | no shuffle of the big side | — | — | — |
+
+2024 takeaway:
+- **At real one-month scale, skew costs wall time even on 10 cores, and AQE fixes it once it's allowed to fire.**
+  - The hot partition is 151 MB and 8.7M rows. Its task runs 9.2 s, 1,150× the median.
+  - With lowered thresholds AQE cut it into 2 MB pieces (200 → 834 tasks). The longest task dropped to 0.47 s, and the join went from 17.9 s to 11.0 s.
+  - Σ task time also fell from 93.5 to 51.7 s, so splitting saved real work, not just waiting. My guess is that the single 8.7M-row sort no longer spills, but I didn't measure spill.
+- **At default thresholds AQE still does nothing on this month**, because 151 MB is under 256 MB. The same goes for a pre-partitioned lookup, at any threshold. Both match the 2013 findings, now at real size.
+- **Salting is still the worst option (+39%).** It removes the straggler, but the salted map stage takes 13 s instead of 6.4 s, and the reduce side does more total work.
+- **Broadcasting the 147-row lookup is still the right answer: 6.1 s, 3× faster than the baseline.** The window has no automatic fix: one task does 20.7 s of the 32 s.
+- None of this changes D-028. The pipeline has no shuffled join on a skewed key and no window over one.

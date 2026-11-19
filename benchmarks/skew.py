@@ -15,6 +15,8 @@ Variants:
   window             row_number() over (partition by family): no partial step exists
   join_baseline      sort-merge join, AQE on but its skew-join rule off
   join_aqe_skew      AQE skew join, with the threshold lowered to fit this data size
+  join_aqe_skew_defaults
+                     AQE skew join at Spark's default thresholds (256 MB / 64 MB)
   join_aqe_skew_cached_lookup
                      same, but the lookup is a cached group-by output (pre-partitioned)
   join_salted        big side salted into N buckets, lookup replicated N times
@@ -156,6 +158,9 @@ def run_variant(
         # the default, the hot partition here would be "split" into one piece.
         conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "2MB")
         return g.join(lk, "opening_family")
+    if name == "join_aqe_skew_defaults":
+        conf.set("spark.sql.adaptive.skewJoin.enabled", "true")
+        return g.join(lk, "opening_family")
     if name == "join_aqe_skew_cached_lookup":
         # Same rule and threshold, but the lookup is the cached output of a group-by on
         # opening_family: already hash-partitioned on the join key, so only the big
@@ -185,6 +190,7 @@ VARIANTS = [
     "window",
     "join_baseline",
     "join_aqe_skew",
+    "join_aqe_skew_defaults",
     "join_aqe_skew_cached_lookup",
     "join_salted",
     "join_broadcast",
