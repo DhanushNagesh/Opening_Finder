@@ -133,7 +133,7 @@ Every run's result fingerprint (cells, side-games, wins, draws, Σ Wilson bound)
 Takeaway so far: at 2013 sizes DuckDB wins 8–11× on a warm query and about 40× on what a dbt run actually pays (start + first query: 0.08 s vs. 2.9–4.5 s). Spark's cost here is fixed per-query overhead (planning, task scheduling, the shuffle stage), not throughput. Going from 1 to 6 months, 8× the rows, Spark's warm time only grows 2.1–2.5× while DuckDB's grows 2.3×, so neither is anywhere near its limit. Tuning shuffle partitions to the core count trims Spark by 18–30% and doesn't change the verdict. Takeaway at 2024 scale:
 - **DuckDB still wins, but by 4–5× instead of 8–11×.** From 2013 H1 to 2024-09 (91× the rows), DuckDB's warm time grew ~70× (0.06 → 3.9–4.3 s) and Spark's ~28× (0.67 → 18–20 s).
 - Spark's fixed overhead got diluted, which is the expected curve. The crossover isn't on one machine: 88M rows, 4.2 GB, is one 2024 month, and DuckDB answers it in ~4 s with no JVM.
-- **Defensible: keep gold on dbt-duckdb (D-005).** Spark earns its place on a cluster, when silver is many months bigger than one machine's RAM and disk. That's not where this project's gold runs.
+- **Defensible: keep gold on dbt-duckdb (D-006).** Spark earns its place on a cluster, when silver is many months bigger than one machine's RAM and disk. That's not where this project's gold runs.
 
 ## File sizing: many tiny Parquet files vs. a few large ones (phase 5, task 4)
 
