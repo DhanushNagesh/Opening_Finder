@@ -23,8 +23,9 @@ from pyspark.sql import functions as F
 from lichess.bronze import swap_in
 
 # Target rows per silver file. coalesce can only merge input splits, so a file is at
-# most this big and at least one bronze split (D-017, D-025).
-ROWS_PER_FILE = 500_000
+# most this big and at least one bronze split (D-017, D-025). Without movetext a 2024
+# row is ~46 bytes of zstd Parquet, so this is ~115 MB per file (D-026).
+ROWS_PER_FILE = 2_500_000
 EXIT_DATA_ERROR = 3
 # Mate scores have no centipawn value. Store them as +/- this sentinel (sign = side that
 # mates); gold clamps every eval well inside it before measuring swings (D-022).
@@ -136,7 +137,9 @@ def dedup(df: DataFrame) -> DataFrame:
 
 
 def build_silver(bronze: DataFrame, month: str) -> DataFrame:
-    return add_columns(dedup(bronze), month)
+    # movetext is ~90% of a 2024 row and gold never reads it; evals_cp already holds
+    # what gold needs from it. Bronze keeps the raw text (D-026).
+    return add_columns(dedup(bronze), month).drop("movetext")
 
 
 def check_quality(silver: DataFrame, expected_rows: int) -> dict[str, int]:
@@ -174,11 +177,68 @@ def check_quality(silver: DataFrame, expected_rows: int) -> dict[str, int]:
     return {"rows": rows, "distinct_ids": distinct_ids}
 
 
-def run(spark: SparkSession, month: str, bronze_root: Path, silver_root: Path) -> dict:
+def _read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+
+
+def _write_json(path: Path, data: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.rename(path)
+
+
+def drop_bronze_parquet(bronze_path: Path, bronze_stats: dict) -> int:
+    """Delete a month's bronze Parquet once silver is built from it; keep `_stats.json`
+    marked `parquet_dropped`, so the verified checksum and parse stats stay on record and
+    bronze's skip-if-current still recognises the month (D-026). Returns bytes freed."""
+    parts = list(bronze_path.glob("*.parquet"))
+    freed = sum(f.stat().st_size for f in parts)
+    # Mark first: a crash between the two steps leaves Parquet that silver just rebuilds
+    # from, never a "dropped" month whose files are half gone without the mark.
+    _write_json(
+        bronze_path / "_stats.json",
+        bronze_stats | {"parquet_dropped": True, "parquet_dropped_bytes": freed},
+    )
+    for f in parts:
+        f.unlink()
+    return freed
+
+
+def run(
+    spark: SparkSession,
+    month: str,
+    bronze_root: Path,
+    silver_root: Path,
+    drop_bronze: bool = False,
+) -> dict:
     started = time.monotonic()
     bronze_path = bronze_root / f"month={month}"
-    if not bronze_path.is_dir():
-        raise FileNotFoundError(f"no bronze partition at {bronze_path}")
+    final = silver_root / f"month={month}"
+    bronze_stats = _read_json(bronze_path / "_stats.json")
+    if not any(bronze_path.glob("*.parquet")):
+        silver_stats = _read_json(final / "_stats.json")
+        if (
+            bronze_stats
+            and bronze_stats.get("parquet_dropped")
+            and silver_stats
+            and silver_stats.get("bronze_sha256") == bronze_stats.get("sha256")
+        ):
+            return {
+                "status": "skipped",
+                "month": month,
+                "bronze_sha256": bronze_stats["sha256"],
+            }
+        raise FileNotFoundError(
+            f"no bronze Parquet at {bronze_path} and no silver built from it; "
+            "re-stream the month (bronze without --skip-if-current, or force in the DAG)"
+        )
+    if drop_bronze and not (bronze_stats and bronze_stats.get("checksum_verified")):
+        # Without a verified checksum on record, a later run couldn't tell that silver
+        # is current, and the month would be gone with nothing to rebuild it from.
+        raise ValueError(f"won't drop {bronze_path}: no verified sha256 in _stats.json")
     bronze = spark.read.parquet(str(bronze_path))
 
     # Counted on bronze independently of the dedup code path, so the DQ check compares
@@ -206,27 +266,36 @@ def run(spark: SparkSession, month: str, bronze_root: Path, silver_root: Path) -
             str(tmp)
         )
         quality = check_quality(spark.read.parquet(str(tmp)), expected)
-        files = len(list(tmp.glob("*.parquet")))
+        parts = list(tmp.glob("*.parquet"))
+        stats = {
+            "status": "written",
+            "month": month,
+            # Identity of the input; lets a later run skip once bronze is dropped.
+            "bronze_sha256": (bronze_stats or {}).get("sha256"),
+            "bronze_rows": bronze_rows,
+            "dropped_null_id": null_ids,
+            "dropped_duplicates": bronze_rows - null_ids - expected,
+            "silver_rows": quality["rows"],
+            "files": len(parts),
+            "silver_bytes": sum(f.stat().st_size for f in parts),
+        }
+        _write_json(tmp / "_stats.json", stats)
     except BaseException:
         shutil.rmtree(tmp, ignore_errors=True)
         raise
     silver_root.mkdir(parents=True, exist_ok=True)
-    swap_in(tmp, silver_root / f"month={month}")
+    swap_in(tmp, final)
     try:
         tmp.parent.rmdir()
     except OSError:  # another month's staging dir is still there
         pass
-    written = quality["rows"]
 
-    return {
-        "month": month,
-        "bronze_rows": bronze_rows,
-        "dropped_null_id": null_ids,
-        "dropped_duplicates": bronze_rows - null_ids - expected,
-        "silver_rows": written,
-        "files": files,
-        "runtime_seconds": round(time.monotonic() - started, 2),
-    }
+    if drop_bronze:
+        stats["bronze_bytes_dropped"] = drop_bronze_parquet(bronze_path, bronze_stats)
+    stats["runtime_seconds"] = round(time.monotonic() - started, 2)
+    # Runtime goes in the printed summary only, so silver's _stats.json is identical
+    # across reruns of the same input.
+    return stats
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -234,12 +303,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--month", required=True, help="YYYY-MM")
     ap.add_argument("--bronze", type=Path, default=Path("data/bronze"))
     ap.add_argument("--silver", type=Path, default=Path("data/silver/games"))
+    ap.add_argument(
+        "--drop-bronze",
+        action="store_true",
+        help="delete the month's bronze Parquet after silver passes its checks",
+    )
     args = ap.parse_args(argv)
 
     spark = spark_session()
     spark.sparkContext.setLogLevel("WARN")
     try:
-        stats = run(spark, args.month, args.bronze, args.silver)
+        stats = run(spark, args.month, args.bronze, args.silver, args.drop_bronze)
     except DataQualityError as e:
         print(f"data quality check failed: {e}", file=sys.stderr)
         return EXIT_DATA_ERROR
