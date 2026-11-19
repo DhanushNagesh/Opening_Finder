@@ -53,3 +53,22 @@ Same machine. Date: 2026-11-18. Input: first 100 MB of `lichess_db_standard_rate
 Where the bytes are (Parquet column chunks, zstd): `movetext` is 92% of bronze (131.7 of 143.8 MB) and 90% of silver. Silver without `movetext` is 14.3 MB. Stripping clock-only comments from `movetext` takes it from 131.7 to 77.7 MB.
 
 The old job shuffled every column twice, and lz4 shuffle files of clock-heavy movetext are several times the zstd input. Scaled linearly to the full 28.6 GB month, the old job needed ~156 GB of temp next to ~41 GB bronze and ~42 GB silver, more than the 129 GB free. The new one needs ~3 GB of temp, so the month fits at a projected ~86 GB peak. That's a projection from the sample; the full-month run in this phase measures the real number.
+
+## Parser: single process vs. chunked process pool (phase 5, task 2)
+
+Same machine (Apple M4, 10 cores, 16 GB). Date: 2026-11-18. Script: `benchmarks/parse_parallel.py <file> --workers 1 2 4 8`, best of 2 runs per cell, input read from local disk. The 2024-09 bronze stream was running at the same time, using 18–29% of one core (it's waiting on the network), so these numbers may be a few percent low.
+
+The parent process decompresses, splits lines and cuts chunks of 20K games at `[Event ` lines (`src/lichess/parallel.py`). Workers run the same `PgnParser`. `pool-games` sends `Game` objects back to the parent, which is what bronze's single Parquet writer would need. `pool-count` returns only counts, the ceiling if each worker wrote its own Parquet.
+
+| Input | Mode | Workers | Games/sec | Compressed MB/s | vs. single |
+|---|---|---|---|---|---|
+| 2013-02 full (18.2 MB, 123,961 games) | single | 1 | 59,687 | 8.7 | 1.0× |
+| | pool-games | 1 / 2 / 4 / 8 | 42,566 / 72,466 / 99,025 / 103,801 | 6.2 / 10.6 / 14.5 / 15.2 | 0.7 / 1.2 / 1.7 / 1.7× |
+| | pool-count | 1 / 2 / 4 / 8 | 53,728 / 100,271 / 131,902 / 142,266 | 7.9 / 14.7 / 19.3 / 20.8 | 0.9 / 1.7 / 2.2 / 2.4× |
+| 2024-09 first 100 MB (308,422 games) | single | 1 | 34,811 | 11.3 | 1.0× |
+| | pool-games | 1 / 2 / 4 / 8 | 25,368 / 43,698 / 51,139 / 46,827 | 8.2 / 14.2 / 16.6 / 15.2 | 0.7 / 1.3 / 1.5 / 1.3× |
+| | pool-count | 1 / 2 / 4 / 8 | 32,055 / 54,751 / 76,244 / 81,102 | 10.4 / 17.8 / 24.7 / 26.3 | 0.9 / 1.6 / 2.2 / 2.3× |
+
+Where the parent's time goes on the 2024 sample, timed separately: decompress + split + chunk 1.54 s (65 MB/s), pickling chunk text to send 0.96 s, unpickling the returned `Game` lists 1.36 s (2,170 pickled bytes per game).
+
+Takeaway: the pool tops out at 4 workers, at 1.5× when `Game` objects come back to one writer and 2.3× when they don't. The ceiling is the single parent: decompressing, chunking and pickling run serially in one process, and shipping parsed games back costs nearly as much as parsing them did. For loading months it doesn't matter. The same 2024-09 file streams from database.lichess.org at ~2.1 MB/s on this connection, so even the single-process parser (11.3 MB/s) is idle ~80% of the time. Bronze stays single-process (D-027). The pool would pay off only with a local copy of the file or a ≥100 Mbit/s link, and then only if each worker wrote its own Parquet files.
