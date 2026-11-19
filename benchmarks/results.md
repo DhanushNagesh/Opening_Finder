@@ -54,6 +54,38 @@ Where the bytes are (Parquet column chunks, zstd): `movetext` is 92% of bronze (
 
 The old job shuffled every column twice, and lz4 shuffle files of clock-heavy movetext are several times the zstd input. Scaled linearly to the full 28.6 GB month, the old job needed ~156 GB of temp next to ~41 GB bronze and ~42 GB silver, more than the 129 GB free. The new one needs ~3 GB of temp, so the month fits at a projected ~86 GB peak. That's a projection from the sample; the full-month run in this phase measures the real number.
 
+## Scale: 2013-02 to one full 2024 month (phase 5, task 1)
+
+Same machine (Apple M4, 10 cores, 16 GB, ~460 GB SSD). Date: 2026-11-18. Commands: `uv run python -m lichess.bronze --month 2024-09` (streamed from the Lichess URL, SHA-256 checked as the bytes pass), then `uv run python -m lichess.spark_jobs.silver_games --month 2024-09 --drop-bronze`. Each stage was wrapped in `/usr/bin/time -l`. Disk was sampled every 5 s: `df` free space, and `du` of the bronze staging, bronze and silver dirs. Single run. The parser, engine, file-size and skew benchmarks ran on the same machine during the stream, but not during silver.
+
+| Stage | Month | Input | Rows | Wall time | CPU | Output |
+|---|---|---|---|---|---|---|
+| bronze, from URL | 2013-02 | 18.2 MB .zst | 123,961 | 3.3 s | — | 25.7 MB, 1 file |
+| silver | 2013-02 | bronze | 123,961 | 5.1 s | — | 23.6 MB, 1 file (with movetext, phase 2) |
+| **bronze, from URL** | **2024-09** | **28.57 GB .zst** | **87,713,219** | **18,484 s (5 h 8 min)** | 4,640 s user, peak RSS 716 MB | **41.3 GB, 351 files** |
+| **silver + drop bronze** | **2024-09** | 41.1 GB bronze | 87,713,219 | **577 s (9.6 min)** | (in the Spark JVM) | **4.24 GB, 36 files (~118 MB each)**; bronze Parquet deleted, `_stats.json` kept |
+
+2024-09 checks:
+- Checksum verified.
+- Data quality: 0 malformed games, 0 stray lines, 0 null ids, 0 duplicates.
+- `count(distinct game_id)` = rows = 87,713,219.
+- tc_bucket split: blitz 41.55M, bullet 32.34M, rapid 12.47M, ultrabullet 0.78M, classical 0.49M, correspondence 0.09M.
+
+| Disk, 2024-09 | GB |
+|---|---|
+| Free before | 125.7 |
+| Peak in pipeline dirs (bronze 41.3 + silver staging, just before the swap) | **47.1** |
+| Peak drop in free space (also counts Spark temp and anything else on the machine) | 52.5 |
+| Kept after the run (silver only) | **4.24** |
+
+Takeaway:
+- **One 2024 month is 708× the rows of 2013-02.** It ran on a laptop with a 47 GB peak and 4.2 GB kept. That matches the D-026 projection of ~48 GB peak and ~4 GB kept, from the 100 MB sample. Before D-025/D-026, the projection was ~156 GB of Spark temp alone, which wouldn't have fit.
+- **The bottleneck is the network, by about 4×.** The stream averaged 1.55 MB/s. The parser used 4,640 CPU-seconds over 18,484 s of wall time, about 25% of one core. That's why the process pool stays unwired (D-027).
+- **Silver is cheap by comparison:** 152K rows/s, including the dedup scan, the data-quality checks on the written output, and the bronze delete.
+- **How many 2024 months fit: disk is no longer the limit.** Each month needs ~47 GB transient and keeps ~4.2 GB. With ~117 GB free after this run, more than ten months fit before the peak no longer does. The real limits are:
+  - time: about 5 h per month at this link speed;
+  - PLAN's 100 GB streaming cap, which needs a yes before going past it. 2024-09 used 28.6 GB, so two more months would bring the total to ~90 GB.
+
 ## Parser: single process vs. chunked process pool (phase 5, task 2)
 
 Same machine (Apple M4, 10 cores, 16 GB). Date: 2026-11-18. Script: `benchmarks/parse_parallel.py <file> --workers 1 2 4 8`, best of 2 runs per cell, input read from local disk. The 2024-09 bronze stream was running at the same time, using 18–29% of one core (it's waiting on the network), so these numbers may be a few percent low.
