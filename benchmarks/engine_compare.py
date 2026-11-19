@@ -22,7 +22,7 @@ Z = 1.96
 QUERY = f"""
 with stg as (
     select * from games
-    where is_decisive_play and rating_band is not null
+    where is_decisive_play and rating_band is not null and white_score is not null
 ),
 by_side as (
     select opening_family, opening, eco, rating_band, tc_bucket,
