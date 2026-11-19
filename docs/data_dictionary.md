@@ -37,7 +37,7 @@ format `<sha256>  <filename>`. Bronze (phase 2) verifies against this.
 | `ECO` | `A00`–`E99` or `?` | Opening code | 0 | `?` 0.14% | `eco`. `?` exactly when the game has zero moves. |
 | `Opening` | string or `?` | `Family: Variation, Sub-variation` | 0 | `?` 0.14% | `opening`; `opening_family` = text before first `:`. Same `?` rule as ECO. |
 | `TimeControl` | `base+inc` (seconds) or `-` | Clock | 0 | 0 | `base_seconds`, `increment_seconds`; `-` (correspondence) → both null. `tc_bucket` is computed from this. |
-| `Termination` | enum | `Normal`, `Time forfeit`, `Abandoned`, `Rules infraction` | 0 | 0 | Kept; `Abandoned` → `is_decisive_play = false`. 2013-02 has only `Normal` and `Time forfeit`. |
+| `Termination` | enum | `Normal`, `Time forfeit`, `Abandoned`, `Rules infraction`, `Unterminated` | 0 | 0 | Kept; `Abandoned` → `is_decisive_play = false`. 2013-02 has only `Normal` and `Time forfeit`. `Unterminated` (found in the full 2024-09 month, not in the 100 MB sample): 23,054 correspondence games still running at dump time, Result `*`, so no `white_score`; `stg_games` drops them (D-029). |
 
 Header order is fixed within a period (Event, Site, [Date, Round,] White, Black, Result,
 UTCDate, UTCTime, WhiteElo, BlackElo, [RatingDiffs], [Titles], ECO, Opening, TimeControl,

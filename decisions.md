@@ -274,3 +274,12 @@ Label: defensible. Fragile points:
 - It also stays silent when one side is already partitioned on the join key (e.g. a cached group-by), which was measured here.
 - So "AQE is on" is not evidence that skew is handled. Check the task count in the UI.
 Revisit if: the pipeline gains a join between two large tables on a skewed key, a window partitioned by a skewed key, or runs on a cluster with many more cores than 10, where the straggler becomes the floor.
+
+## D-029 — Drop result `*` games in `stg_games`, not in silver
+Date: 2026-11-18 · Phase: 5 · Status: Accepted
+Context: The first dbt build with 2024-09 failed `not_null_stg_games_white_score` on 20,430 rows. The full month has a `Termination` value the 2013 data and the 100 MB 2024 sample didn't: `Unterminated`. These are 23,054 correspondence games still in progress when the month was dumped, with Result `*`. Silver's `is_decisive_play` only excludes `Abandoned` and games under 2 moves, so 20,430 of them passed it with a null `white_score`.
+Options: (a) fix `is_decisive_play` in silver to also require a result, then rebuild 2024-09 silver; (b) add `white_score is not null` to the `stg_games` filter.
+Decision: (b). Silver keeps the rows and its flag as is. Gold now requires a score.
+Why: (a) means re-streaming the month (5 h at the measured link), because its bronze was dropped (D-026). (b) gives the same gold for every month at no cost. It changes nothing for 2013 (0 games with result `*`), and the 2024-09 side-game count matches 2 × (87,242,165 − 20,430) exactly. The dbt test did its job: it caught a value nobody had seen in the samples.
+Label: defensible. Fragile point: silver's `is_decisive_play` now doesn't mean "counts for stats" on its own. Anything reading silver directly (the app doesn't) must also require a score. When silver is next rebuilt for another reason, fold the condition into the flag.
+Revisit if: silver gets rebuilt anyway, or another consumer reads silver directly.
