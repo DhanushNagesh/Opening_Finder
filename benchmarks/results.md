@@ -124,3 +124,38 @@ Takeaway:
 - The sweet spot is enough files or row groups to keep every core busy, each well above ~1 MB. At this size that's 10–100 files.
 - At 2024 scale this is silver's current rule: `ROWS_PER_FILE = 2.5M` gives ~115 MB files, one row group each, about 35 files per month (D-026). That's ≥3 row groups per core, with per-file overhead well under 1%.
 - Defensible: Spark's default after a shuffle is 200 files per month (`spark.sql.shuffle.partitions`). For a 2013 month that's 200 files of ~20 KB, the top row of this table. That's why silver sizes its output explicitly instead.
+
+## Skew: group-by, window and join on `opening_family` (phase 5, task 5)
+
+Same machine (Apple M4, 10 cores, 16 GB). Date: 2026-11-18. Script: `benchmarks/skew.py --months 2013-01 … 2013-06 --replicate 20 --repeat 3`. Spark 3.5.9 `local[*]`, 200 shuffle partitions. The 2024-09 bronze stream was running at the same time.
+
+Input: 2013 H1 silver (`game_id`, `opening_family`, `white_elo`, `white_score`), with every row repeated 20 times → 19,320,560 rows across 287 families. Each copy gets its own `rep`, so a salt hashed from (`game_id`, `rep`) still spreads it. Every key keeps its share of rows, so the skew is real; only the absolute size is scaled up so tasks are long enough to time. The hot key is Sicilian Defense, at 10.33% of rows.
+
+The join is games → a per-family lookup table (287 rows, built as a local table, like a seed or file). Broadcast is off unless stated. AQE is on, with partition coalescing off so task counts change only with the fix being measured.
+
+Task numbers come from the Spark UI REST API (`/stages/{id}/{attempt}/taskList`, executor run time and shuffle read per task), for the stage that reads the skewed shuffle. Wall time is the best of 3 for the whole query, written to the `noop` sink.
+
+| Variant | Wall | Tasks | Shuffle per task: max / median | Task time: max / median | Σ task time |
+|---|---|---|---|---|---|
+| group-by: count, avg per family | 0.42 s | 200 | 30 / 6 records | 5 / 0.5 ms | 0.18 s |
+| window: `row_number()` over family | 2.37 s | 200 | 1,995,280 / 3,130 records (16.0 MB / 26 KB) | 1,543 / 6 ms | 12.8 s |
+| join, sort-merge, no fix | 2.43 s | 200 | 1,995,281 / 3,132 records (16.0 MB / 26 KB) | 1,198 / 5 ms | 10.1 s |
+| join + AQE skew join (threshold 8 MB, advisory 2 MB) | 2.45 s | 220 | 926,683 / 6,921 records (7.5 MB / 57 KB) | **524** / 6 ms | 11.9 s |
+| join + AQE skew join, lookup is a cached group-by output | 2.17 s | 200 | 1,995,280 / 3,130 records | 1,128 / 4 ms | 9.4 s |
+| join, salted into 16 buckets | 5.61 s | 200 | 311,535 / 85,097 records (5.9 / 1.6 MB) | **266** / 62 ms | 14.7 s |
+| join, lookup broadcast | **1.38 s** | no shuffle of the big side | — | — | — |
+
+What happened:
+- **Group-by: no skew, as predicted.** Partial aggregation runs before the shuffle, so each of the 8 map tasks sends one row per family: 1,467 records in total for 19.3M input rows. This is the shape of every gold model (`fct_opening_performance` etc.), so gold has no skew problem in either engine.
+- **Window and join: one task gets the whole hot key.** Its shuffle read is 640× the median (2.0M rows vs. 3.1K), and it runs 240–260× longer than the median task. No partial step exists for a window, and AQE's skew handling covers only joins. The fix for a skewed window is a finer partition key, if the logic allows it.
+- **AQE skew join didn't fire at first, for two separate reasons, both measured:**
+  - Default thresholds. A partition counts as skewed only above 256 MB (`skewedPartitionThresholdInBytes`), and it's cut into ~64 MB pieces (`advisoryPartitionSizeInBytes`). The hot partition here is 16 MB, so at the defaults nothing changed. Below ~256 MB per partition, AQE ignores skew by design.
+  - Pre-partitioned input. When the lookup was the cached output of a group-by on `opening_family`, it was already hash-partitioned on the join key. Spark then shuffles only the big side, and the skew-join rule, which needs a shuffle stage on both sides, never applies: same 200 tasks, same 1.1 s straggler.
+  - With a plain lookup table and lowered thresholds, AQE split the hot partition into 21 pieces (200 → 220 tasks). The longest task dropped from 1,198 to 524 ms. It didn't reach the median because Queen's Pawn Game (7.1%) shares a split piece's partition.
+- **Salting flattens the reduce side best (longest task 266 ms) but costs the most overall.** The big side's map stage went from 1.1 s to 3.9 s of wall time, with every reduce partition now non-empty. The lookup also has to be copied 16 times. Total task time went up 46%, and wall time was 2.3× the baseline.
+- **On this machine, none of the skew fixes changes wall time.** A stage can't finish before its longest task or before Σ task time ÷ cores. With 10 cores, the hot key (10.3% of rows) is about one core's fair share: 10.1 s ÷ 10 = 1.0 s vs. the 1.2 s straggler. So the straggler adds almost nothing.
+- **Projection, not measured:** on 100 cores the same stage's floor would be the straggler. That's ~1.2 s with no fix vs. ~0.12 s of fair share, so AQE (0.52 s) or salting (0.27 s) would be a 2–4× win there.
+- **The right fix for this join is not a skew fix at all.** The lookup is 287 rows, so broadcast it. Then the big side never shuffles, and this is the fastest variant (1.38 s, −43%). Spark would do that by default, since `autoBroadcastJoinThreshold` is 10 MB.
+- Before/after for the resume line: longest join task 1,198 ms → 524 ms (AQE skew join) → 266 ms (salting). Wall time 2.43 s → 1.38 s (broadcast).
+
+| 2024-09 silver, ~88M rows (no replication) | pending: rerun once that month's silver lands | | | | |

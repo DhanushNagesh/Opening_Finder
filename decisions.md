@@ -262,3 +262,15 @@ Decision: (b). `lichess.parallel` (one reader splits at `[Event ` lines into 20K
 Why: On the 2024 sample the pool reaches 1.5× with one writer (2.3× if workers wrote their own output), capped by the serial parent: decompress, chunk, pickle. The real 2024-09 stream arrives at ~2.1 MB/s, while the single-process parser handles 11.3 MB/s, so parsing isn't the bottleneck and the pool would add processes, pickling and a second code path to buy nothing.
 Label: defensible: measured first, didn't build the complex thing into the pipeline. Fragile point: the parser logs a malformed game's line number relative to its chunk; `ParseStats` examples are made absolute, but the log lines aren't.
 Revisit if: months are loaded from a local copy or over a ≥100 Mbit/s link. Then have each worker write its own Parquet files, since the measured ceiling says shipping `Game` objects back to one writer wastes most of the gain.
+
+## D-028 — No skew handling in the pipeline; small lookups are broadcast
+Date: 2026-11-18 · Phase: 5 · Status: Accepted
+Context: `opening_family` is skewed (Sicilian Defense is 10.3% of 2013 H1 rows). PLAN phase 5 task 5 asks for before/after numbers on a skewed group-by and join.
+Options: (a) turn on AQE skew join with lowered thresholds in `spark_session`; (b) salt joins on `opening_family`; (c) nothing, plus broadcast for any join to a small lookup.
+Decision: (c). `benchmarks/skew.py` keeps the measured AQE and salting variants. Pipeline config is unchanged.
+Why: On 19.3M rows the group-by isn't skewed: partial aggregation sends 1,467 records through the shuffle. Every gold model is that shape, and silver's only window is on `game_id`, which is unique per row. The skewed join is 2.43 s as a sort-merge join and 1.38 s with the 287-row lookup broadcast. AQE skew join (longest task 1,198 → 524 ms) and salting (→ 266 ms) didn't change wall time on 10 cores, and salting cost 2.3×.
+Label: defensible. Fragile points:
+- AQE skew join stays silent below its 256 MB / 64 MB defaults.
+- It also stays silent when one side is already partitioned on the join key (e.g. a cached group-by), which was measured here.
+- So "AQE is on" is not evidence that skew is handled. Check the task count in the UI.
+Revisit if: the pipeline gains a join between two large tables on a skewed key, a window partitioned by a skewed key, or runs on a cluster with many more cores than 10, where the straggler becomes the floor.
