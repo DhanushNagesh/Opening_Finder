@@ -156,9 +156,33 @@ Method:
 | 100 | 1.9 MB | 191.9 MB (+7%) | 3.04 s | 10 | 0.214 s | 0.419 s | 0.021 s | 0.124 s |
 | 10 | 18.5 MB | 185.5 MB (+3%) | 2.48 s | 10 | 0.285 s | 0.378 s | 0.014 s | 0.103 s |
 | 1 | 180 MB, 2 row groups | 180.0 MB | 4.72 s | 10 (2 do work) | 0.368 s | 1.659 s | 0.018 s | 0.352 s |
-| 2024-09 silver, ~4 GB | — | pending: rerun on silver once the stream finishes | | | | | | |
 
-Takeaway:
+### Rerun on real 2024-09 silver
+
+Date: 2026-11-18, after the stream had finished. Input: `data/silver/games/month=2024-09`, 87,713,219 rows, 4,238 MB in 36 files (~118 MB, one row group each). Command: `benchmarks/file_sizing.py --source data/silver/games/month=2024-09 --files 5000 500 36 10 --repeat 3 --no-cache --method split`.
+
+How this run differs from the 2013 one:
+- **Rows are re-read for each layout instead of cached** (`--no-cache`). Caching the full-width month ran the 4 GB Spark driver out of heap, so write times include reading the source, the same for every layout.
+- **No shuffle** (`--method split`). The 2013 method's round-robin `repartition(5000)` also ran out of heap: Spark sorts every row before a round-robin repartition. Plain full-width reads and `repartition(36)` passed. The split method coalesces to at most n tasks and caps rows per file at rows/n, so file counts come out near n rather than exactly n.
+- Silver has no `movetext`, so the full query reads `opening`, the widest string column left.
+
+Results matched in every layout and both engines.
+
+| Files | Median file | Total on disk | Spark write | Spark read tasks | Spark narrow | Spark full | DuckDB narrow | DuckDB full |
+|---|---|---|---|---|---|---|---|---|
+| 5,020 | 0.88 MB | 4,410.7 MB (+4%) | 154.6 s | 186 | 5.386 s | 4.772 s | 0.430 s | 0.882 s |
+| 522 | 8.2 MB | 4,110.0 MB (−3%) | 114.6 s | 48 | 1.839 s | 3.362 s | 0.170 s | 0.594 s |
+| 63 | 109 MB | 4,235.8 MB | 84.6 s | 38 | 1.613 s | 3.353 s | 0.147 s | 0.566 s |
+| 16 | 363 MB, ~3 row groups each | 4,238.0 MB | 77.3 s | 34 | 1.483 s | 3.288 s | 0.169 s | 0.593 s |
+
+2024 takeaway:
+- **The same shape at 22× the bytes.** Sub-MB files cost 2× on write, 3.3–3.6× on Spark's narrow query, 2.5× on DuckDB's narrow query, and 1.4–1.6× on full scans.
+- **From ~8 MB up the curve is flat** (8 MB → 363 MB within ~10%). Big files don't hurt here, because Spark rolls a new row group every 128 MB, so a 363 MB file still gives 3 units of parallelism. The 2013 single-file case was slow only because it had 2 row groups for 10 cores.
+- The 522-file layout came out 3% smaller on disk than the larger-file layouts. I haven't checked why.
+- **What a month of silver needs:** current silver (36 files, ~118 MB, one row group each) sits on the flat part. It's one of the two cheapest layouts to write, and within noise of the best on reads.
+- **New fragile point:** wide full-row Spark work over a whole 2024 month (cache, round-robin repartition) fails at the 4 GB driver heap set in `spark_session`. Nothing in the pipeline does that today: silver reads bronze, and gold is DuckDB.
+
+2013 takeaway:
 - Tiny files are expensive on every axis. At 5,000 files of 52 KB:
   - Spark's write is 12× slower than at 10 files (one task and one file commit per file).
   - The same rows take 44% more disk, because every file repeats its footer, schema and dictionaries.

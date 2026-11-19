@@ -14,6 +14,7 @@ every layout alike; this measures per-file overhead, not disk throughput.
 
 import argparse
 import json
+import math
 import shutil
 import statistics
 import time
@@ -41,6 +42,20 @@ def main() -> None:
     ap.add_argument("--out", required=True, help="scratch dir, deleted at the end")
     ap.add_argument("--repeat", type=int, default=3)
     ap.add_argument("--keep", action="store_true")
+    ap.add_argument(
+        "--method",
+        choices=["repartition", "split"],
+        default="repartition",
+        help="repartition: round-robin shuffle into exactly n files. split: no "
+        "shuffle; coalesce to at most n tasks and cap rows per file at rows/n "
+        "(file count is then about n)",
+    )
+    ap.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="re-read the source for each layout instead of caching it (for inputs "
+        "bigger than the driver heap; write times then include the source read)",
+    )
     args = ap.parse_args()
 
     import duckdb
@@ -54,7 +69,8 @@ def main() -> None:
     src = spark.read.parquet(*args.source)
     col = WIDE_COL if WIDE_COL in src.columns else "opening"
     wide = WIDE.format(col=col)
-    src = src.cache()
+    if not args.no_cache:
+        src = src.cache()
     rows = src.count()
     src_mb = (
         sum(p.stat().st_size for d in args.source for p in Path(d).glob("*.parquet"))
@@ -67,6 +83,8 @@ def main() -> None:
                 "rows": rows,
                 "source_mb": round(src_mb, 1),
                 "wide_column": col,
+                "cached": not args.no_cache,
+                "method": args.method,
                 "spark": pyspark.__version__,
                 "cores": spark.sparkContext.defaultParallelism,
                 "max_partition_bytes": spark.conf.get(
@@ -84,14 +102,22 @@ def main() -> None:
         for n in args.files:
             path = out / f"files={n}"
             t = time.perf_counter()
-            src.repartition(n).write.mode("overwrite").parquet(str(path))
+            if args.method == "repartition":
+                src.repartition(n).write.mode("overwrite").parquet(str(path))
+            else:
+                # Round-robin repartition sorts every row first; on 88M full-width
+                # silver rows that ran a 4 GB driver out of heap. This never shuffles.
+                parts_in = src.rdd.getNumPartitions()
+                src.coalesce(min(n, parts_in)).write.option(
+                    "maxRecordsPerFile", math.ceil(rows / n)
+                ).mode("overwrite").parquet(str(path))
             write_s = time.perf_counter() - t
             parts = sorted(path.glob("*.parquet"))
             sizes = [p.stat().st_size for p in parts]
 
             def spark_q(sql: str, p: str = str(path)):
                 spark.read.parquet(p).createOrReplaceTempView("t")
-                return sorted(tuple(r) for r in spark.sql(sql).collect())
+                return sorted((tuple(r) for r in spark.sql(sql).collect()), key=str)
 
             s_narrow = best(lambda: spark_q(NARROW), args.repeat)
             s_wide = best(lambda: spark_q(wide), args.repeat)
@@ -102,7 +128,7 @@ def main() -> None:
             def duck_q(sql: str, glob: str = glob):
                 con = duckdb.connect()
                 con.execute(f"create view t as select * from read_parquet('{glob}')")
-                r = sorted(con.execute(sql).fetchall())
+                r = sorted(con.execute(sql).fetchall(), key=str)  # eco can be null
                 con.close()
                 return r
 
