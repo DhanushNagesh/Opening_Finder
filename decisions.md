@@ -283,3 +283,14 @@ Decision: (b). Silver keeps the rows and its flag as is. Gold now requires a sco
 Why: (a) means re-streaming the month (5 h at the measured link), because its bronze was dropped (D-026). (b) gives the same gold for every month at no cost. It changes nothing for 2013 (0 games with result `*`), and the 2024-09 side-game count matches 2 × (87,242,165 − 20,430) exactly. The dbt test did its job: it caught a value nobody had seen in the samples.
 Label: defensible. Fragile point: silver's `is_decisive_play` now doesn't mean "counts for stats" on its own. Anything reading silver directly (the app doesn't) must also require a score. When silver is next rebuilt for another reason, fold the condition into the flag.
 Revisit if: silver gets rebuilt anyway, or another consumer reads silver directly.
+
+## D-030 — Bronze resumes a dropped stream with HTTP Range requests
+Date: 2026-11-19 · Phase: 5 · Status: Accepted
+Context: The first 2024-08 run died 63 minutes in. A 60 s read timeout fired after the link stalled, and the month had to restart from byte 0. At 30 GB per month and 1–5 MB/s, one stall can cost hours, and a link change always kills the connection.
+Options: (a) leave it to retries (Airflow / rerun the month from byte 0); (b) on a read error or early EOF, reopen at the next byte with `Range: bytes=N-` and keep feeding the same SHA-256 hasher and zstd decompressor; (c) download in parallel ranges to a file.
+Decision: (b). `ResumingReader` retries up to 50 times with exponential backoff capped at 60 s. A resume must get HTTP 206 with a `Content-Range` starting at exactly N, or the month fails at once.
+Why: Bytes still arrive contiguous and exactly once, so D-009 holds: the checksum covers the whole file, and nothing raw touches disk. Tests show a stream cut 5 times (by exceptions or early EOFs) gives byte-identical Parquet. Lichess answered a real resume with 206 `bytes 1000000-…`. (c) breaks the no-raw-on-disk rule and needs 30 GB of scratch space.
+Label: defensible. Fragile points:
+- It trusts the file not to change between resumes. Lichess files are immutable, and the end-of-stream checksum is the backstop, but a mismatch is only caught at the end.
+- A server or proxy that ignores `Range` is refused rather than spliced in.
+Revisit if: streams need to resume across process restarts. That needs checkpointed parser and writer state, which this doesn't keep.
