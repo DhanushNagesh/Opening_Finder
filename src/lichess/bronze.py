@@ -120,7 +120,9 @@ class HashingReader:
 
 # A 30 GB month over a home link sees stalls and resets; one of them shouldn't throw away
 # hours of streaming. Each drop reopens at the next byte with a Range request (D-030).
-MAX_RESUMES = 50
+# Consecutive resumes that got no new bytes; with the 60 s backoff cap, about a
+# 30 minute outage. Drops with progress in between never count against it (D-030).
+MAX_STALLED_RESUMES = 30
 RESUME_BACKOFF_MAX_S = 60.0
 _RETRYABLE = (OSError, http.client.HTTPException)  # timeouts, resets, TLS, short reads
 
@@ -135,16 +137,18 @@ class ResumingReader:
         open_at: Callable[[int], BinaryIO],
         length: int,
         first: BinaryIO | None = None,
-        max_resumes: int = MAX_RESUMES,
+        max_stalled: int = MAX_STALLED_RESUMES,
         sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self._open_at = open_at
         self._length = length
         self._resp = first if first is not None else open_at(0)
-        self._max = max_resumes
+        self._max = max_stalled
         self._sleep = sleep
         self.pos = 0
         self.resumes = 0
+        self.stalled = 0
+        self._last_resume_pos = -1
 
     def read(self, size: int = -1) -> bytes:
         while True:
@@ -164,11 +168,14 @@ class ResumingReader:
             raise BronzeError("connection dropped and the length is unknown") from err
         while True:
             self.resumes += 1
-            if self.resumes > self._max:
+            self.stalled = self.stalled + 1 if self.pos == self._last_resume_pos else 1
+            self._last_resume_pos = self.pos
+            if self.stalled > self._max:
                 raise BronzeError(
-                    f"gave up after {self._max} resumes at byte {self.pos:,}"
+                    f"gave up after {self._max} resumes with no progress at byte "
+                    f"{self.pos:,} ({self.resumes - 1} resumes in total)"
                 ) from err
-            wait = min(RESUME_BACKOFF_MAX_S, 2.0 ** min(self.resumes, 6))
+            wait = min(RESUME_BACKOFF_MAX_S, 2.0 ** min(self.stalled, 6))
             log.warning(
                 "stream dropped at byte %s of %s (%s); resume %d in %.0f s",
                 f"{self.pos:,}",

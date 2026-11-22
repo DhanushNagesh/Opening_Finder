@@ -258,12 +258,26 @@ def test_resuming_reader_gives_up_and_leaves_old_partition(
     compressed: bytes, tmp_path: Path
 ) -> None:
     part = _existing_partition(tmp_path)
+    # every=0: each connection fails before sending a byte, so no resume makes progress.
     reader, _ = _flaky_reader(
-        compressed, drops=100, every=1000, mode="raise", max_resumes=3
+        compressed, drops=100, every=0, mode="raise", max_stalled=3
     )
-    with pytest.raises(BronzeError, match="gave up after 3 resumes"):
+    with pytest.raises(BronzeError, match="gave up after 3 resumes with no progress"):
         write_partition(MONTH, reader, tmp_path, None, source="test")
     assert [p.name for p in part.iterdir()] == ["marker"]
+
+
+def test_drops_with_progress_never_hit_the_limit(compressed: bytes) -> None:
+    # 2024-10 failed after 50 resumes spread over 22 h, each one after new bytes.
+    every = len(compressed) // 60 + 1
+    reader, _ = _flaky_reader(
+        compressed, drops=59, every=every, mode="raise", max_stalled=3
+    )
+    out = b""
+    while chunk := reader.read(4096):
+        out += chunk
+    assert out == compressed
+    assert (reader.resumes, reader.stalled) == (59, 1)
 
 
 def test_resume_without_length_fails() -> None:
