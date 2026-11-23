@@ -76,6 +76,14 @@ def run_cli(module: str, *args: str) -> dict:
             type="boolean",
             description="Re-stream months whose bronze checksum already matches",
         ),
+        # Bronze for these months is ~41 GB each (2024); keep only silver (~4 GB) once
+        # it passes its checks. Rebuilding silver then means re-streaming (D-026).
+        "drop_bronze_from": Param(
+            "2017-01",
+            type="string",
+            pattern=MONTH_PATTERN,
+            description="Delete bronze Parquet after silver for months >= this",
+        ),
     },
     tags=["lichess"],
 )
@@ -109,7 +117,8 @@ def lichess_pipeline():
             return out | {"attempt": ti.try_number}
 
         # none_failed: a skipped bronze still rebuilds silver, which is cheap next to
-        # the stream and catches a silver partition that was deleted or is stale.
+        # the stream and catches a silver partition that was deleted or is stale. If
+        # bronze was dropped (D-026), silver skips when it's current and fails if not.
         @task(
             retries=1,
             retry_delay=timedelta(minutes=1),
@@ -118,7 +127,16 @@ def lichess_pipeline():
             max_active_tis_per_dag=1,
         )
         def silver(month: str) -> dict:
-            return run_cli("lichess.spark_jobs.silver_games", "--month", month)
+            args = ["--month", month]
+            if month >= get_current_context()["params"]["drop_bronze_from"]:
+                args.append("--drop-bronze")
+            out = run_cli("lichess.spark_jobs.silver_games", *args)
+            if out["status"] == "skipped":
+                raise AirflowSkipException(
+                    f"{month} bronze was dropped; silver already built from "
+                    f"{out['bronze_sha256']}"
+                )
+            return out
 
         bronze(month) >> silver(month)
 

@@ -158,7 +158,7 @@ Label: defensible. Fragile point: names written with a comma and no colon (`King
 Revisit if: a 2024 month shows many comma-only names, or gold needs families that match ECO groupings.
 
 ## D-017 — Silver: dedup keeps the earliest row; file count sized from row count
-Date: 2026-11-13 · Phase: 2 · Status: Accepted
+Date: 2026-11-13 · Phase: 2 · Status: Superseded in part by D-025 (how dedup and file sizing run; the earliest-row rule stands)
 Context: `dropDuplicates` keeps an arbitrary row when duplicates differ, so two runs could keep different rows. Separately, Spark's default 200 shuffle partitions wrote 200 files of ~200 KB for a 124K-row month (AQE doesn't merge them once the frame is cached).
 Options: dedup with `dropDuplicates` vs. `row_number()` over `game_id` ordered by `utc_datetime, movetext`. Files: default partitions, `coalesce(1)`, or `repartition(ceil(rows / 500K), game_id)`.
 Decision: `row_number()` with a fixed order. `repartition(ceil(rows / 500K), "game_id")`, written as zstd Parquet (Spark's default is snappy; bronze is already zstd).
@@ -235,3 +235,77 @@ Decision: N = 100, as the dbt var `min_games_best_openings`. The mart rolls `fct
 Why: The Wilson bound already handles sample size in the ranking; N exists so the app doesn't show lines whose interval is too wide to mean anything. ±0.10 is roughly the gap between a good and a bad opening at club level. At 1200 blitz it still leaves 26 White lines to rank. Users pick an opening by name, so splitting one name over two ECO rows would split its sample.
 Label: defensible. Fragile point: N is tuned to 6 months of 2013. A 2024 month has about 100× the games, so N = 100 would let thousands of thin lines in. Re-pick it (or tie it to slice size) once phase 5 loads 2024.
 Revisit if: phase 5 adds 2024 months, or the app wants family-level rankings too.
+
+## D-025 — Silver dedup shuffles only `game_id`; checks run on staged output, no cache
+Date: 2026-11-18 · Phase: 5 · Status: Accepted
+Context: Before streaming a 2024 month, silver ran on the first 100 MB of 2024-09 (308K games). Spark's temp dir peaked at 547 MB, 5.5x the compressed input, because the dedup window and `repartition(files, "game_id")` each shuffled every column, and `movetext` with `[%clk]` on every move is 92% of the bytes. Scaled to the 28.6 GB month: ~156 GB of shuffle files on top of ~41 GB bronze and ~42 GB silver, against 129 GB free. Dropping `.cache()` alone made it worse (798 MB): the cache wasn't the problem, the shuffles were.
+Options: (a) zstd shuffle codec (measured 336 MB, still ~96 GB for the month); (b) one shuffle instead of two (estimated ~half); (c) find duplicate ids from the id column only, broadcast that list, pass unique rows through with no shuffle, window only the duplicated rows.
+Decision: (c). File sizing uses `coalesce(ceil(rows / 500K))`, which merges input splits without a shuffle. No `.cache()`: the month is written to `data/silver/_staging_games/`, the DQ checks run on the written files, then the partition is swapped in with the same two-rename swap as bronze. Dynamic partition overwrite is gone.
+Why: Measured on the same sample: Spark temp 547 MB → 10.6 MB (0.1x input), runtime 11.7 s → 9.5 s. 2013 H1 silver and every gold table came out identical (row counts, fingerprints, mart ranking hash). Checking the written files is also stricter than checking a cached frame, and a failed check still leaves the old partition untouched.
+Label: defensible. Fragile points: the broadcast assumes few duplicates; a month where millions of ids repeat (a botched Lichess re-export) would broadcast a big list, and the driver's 4 GB is the limit. `coalesce` can only merge splits, never split them, so a silver file is never smaller than one bronze input split and can't be tuned below that. A rerun briefly holds the old and new partition at once (the swap), so it needs one extra month of silver free.
+Revisit if: a month shows a real duplicate rate, or phase 5's file-size benchmark wants files that differ from the bronze file layout.
+
+## D-026 — Silver drops `movetext`; bronze Parquet is deleted after silver for months ≥ 2017-01
+Date: 2026-11-18 · Phase: 5 · Status: Accepted
+Context: Goal for phase 5 is the least local disk that still gives the same app. On the 2024-09 sample, `movetext` is 92% of bronze and 90% of silver, and no gold model reads it (gold reads `evals_cp`, which silver already extracts, D-022). Even after D-025, one 2024 month projected to ~41 GB bronze + ~42 GB silver kept on disk, so 1 month fit and 2 didn't.
+Options: (1) drop `movetext` from silver; (2) also delete bronze once silver passes; (3) strip `[%clk]` from bronze movetext; (4) keep a 10% hash sample of 2024; (5) have the parser write slim rows and skip full bronze.
+Decision: (1) + (2). Silver keeps every other column. `silver_games --drop-bronze` deletes the month's bronze Parquet after the swap and keeps bronze's `_stats.json` with `parquet_dropped: true`. Silver writes its own `_stats.json` with the `bronze_sha256` it was built from. With bronze dropped, silver skips if its stats match that SHA-256 and fails with "re-stream" otherwise. The DAG passes `--drop-bronze` for months ≥ the `drop_bronze_from` param (default `2017-01`). Silver files target 2.5M rows (~115 MB at 2024 row size) instead of 500K, since rows are ~10x smaller.
+Why: Sample: silver 146 → 14.3 MB. Projected 2024 month: ~4 GB kept instead of ~83 GB, with a ~48 GB peak while it runs (bronze plus silver plus ~3 GB Spark temp), so the disk caps the peak, not the number of months. 2013 H1 silver and all gold tables came out identical. Keeping the bronze stats keeps the verified checksum and parse counts on record, and bronze's skip-if-current works unchanged. (3) breaks the raw-bronze promise for a smaller gain; (4) weakens the full-scale claim; (5) reverses D-022 and leaves the Spark job with nothing to do.
+Label: defensible. Costs and fragile points: any silver change for a dropped month (a new column, a bug fix) means re-streaming ~30 GB per month at ~45 min each, so 2013–2016 keep bronze for cheap iteration. Deleting a silver partition by hand after bronze was dropped makes that month fail until a `force` run. `movetext`-level analysis (openings by move sequence, clock use) needs bronze, which then has to be rebuilt.
+Revisit if: gold needs anything from movetext beyond evals, or disk stops being the constraint.
+
+## D-027 — Process-pool parser built and measured, not wired into bronze
+Date: 2026-11-18 · Phase: 5 · Status: Accepted
+Context: PLAN phase 2 task 2 says to parallelise parsing inside one file only once single-process speed is measured and is the bottleneck. Phase 5 task 2 asks for single vs. pool games/sec.
+Options: (a) wire the pool into bronze; (b) keep bronze single-process and keep the pool as a measured, tested option.
+Decision: (b). `lichess.parallel` (one reader splits at `[Event ` lines into 20K-game chunks, at most 2× workers chunks in flight) is tested to give the same games and stats as the single-process parser, and benchmarked in `benchmarks/parse_parallel.py`. Bronze doesn't use it.
+Why: On the 2024 sample the pool reaches 1.5× with one writer (2.3× if workers wrote their own output), capped by the serial parent: decompress, chunk, pickle. The real 2024-09 stream arrives at ~2.1 MB/s, while the single-process parser handles 11.3 MB/s, so parsing isn't the bottleneck and the pool would add processes, pickling and a second code path to buy nothing.
+Label: defensible: measured first, didn't build the complex thing into the pipeline. Fragile point: the parser logs a malformed game's line number relative to its chunk; `ParseStats` examples are made absolute, but the log lines aren't.
+Revisit if: months are loaded from a local copy or over a ≥100 Mbit/s link. Then have each worker write its own Parquet files, since the measured ceiling says shipping `Game` objects back to one writer wastes most of the gain.
+
+## D-028 — No skew handling in the pipeline; small lookups are broadcast
+Date: 2026-11-18 · Phase: 5 · Status: Accepted
+Context: `opening_family` is skewed (Sicilian Defense is 10.3% of 2013 H1 rows). PLAN phase 5 task 5 asks for before/after numbers on a skewed group-by and join.
+Options: (a) turn on AQE skew join with lowered thresholds in `spark_session`; (b) salt joins on `opening_family`; (c) nothing, plus broadcast for any join to a small lookup.
+Decision: (c). `benchmarks/skew.py` keeps the measured AQE and salting variants. Pipeline config is unchanged.
+Why: On 19.3M rows the group-by isn't skewed: partial aggregation sends 1,467 records through the shuffle. Every gold model is that shape, and silver's only window is on `game_id`, which is unique per row. The skewed join is 2.43 s as a sort-merge join and 1.38 s with the 287-row lookup broadcast. AQE skew join (longest task 1,198 → 524 ms) and salting (→ 266 ms) didn't change wall time on 10 cores, and salting cost 2.3×.
+Label: defensible. Fragile points:
+- AQE skew join stays silent below its 256 MB / 64 MB defaults.
+- It also stays silent when one side is already partitioned on the join key (e.g. a cached group-by), which was measured here.
+- So "AQE is on" is not evidence that skew is handled. Check the task count in the UI.
+Revisit if: the pipeline gains a join between two large tables on a skewed key, a window partitioned by a skewed key, or runs on a cluster with many more cores than 10, where the straggler becomes the floor.
+
+## D-029 — Drop result `*` games in `stg_games`, not in silver
+Date: 2026-11-18 · Phase: 5 · Status: Accepted
+Context: The first dbt build with 2024-09 failed `not_null_stg_games_white_score` on 20,430 rows. The full month has a `Termination` value the 2013 data and the 100 MB 2024 sample didn't: `Unterminated`. These are 23,054 correspondence games still in progress when the month was dumped, with Result `*`. Silver's `is_decisive_play` only excludes `Abandoned` and games under 2 moves, so 20,430 of them passed it with a null `white_score`.
+Options: (a) fix `is_decisive_play` in silver to also require a result, then rebuild 2024-09 silver; (b) add `white_score is not null` to the `stg_games` filter.
+Decision: (b). Silver keeps the rows and its flag as is. Gold now requires a score.
+Why: (a) means re-streaming the month (5 h at the measured link), because its bronze was dropped (D-026). (b) gives the same gold for every month at no cost. It changes nothing for 2013 (0 games with result `*`), and the 2024-09 side-game count matches 2 × (87,242,165 − 20,430) exactly. The dbt test did its job: it caught a value nobody had seen in the samples.
+Label: defensible. Fragile point: silver's `is_decisive_play` now doesn't mean "counts for stats" on its own. Anything reading silver directly (the app doesn't) must also require a score. When silver is next rebuilt for another reason, fold the condition into the flag.
+Revisit if: silver gets rebuilt anyway, or another consumer reads silver directly.
+
+## D-030 — Bronze resumes a dropped stream with HTTP Range requests
+Date: 2026-11-19 · Phase: 5 · Status: Accepted
+Context: The first 2024-08 run died 63 minutes in. A 60 s read timeout fired after the link stalled, and the month had to restart from byte 0. At 30 GB per month and 1–5 MB/s, one stall can cost hours, and a link change always kills the connection.
+Options: (a) leave it to retries (Airflow / rerun the month from byte 0); (b) on a read error or early EOF, reopen at the next byte with `Range: bytes=N-` and keep feeding the same SHA-256 hasher and zstd decompressor; (c) download in parallel ranges to a file.
+Decision: (b). `ResumingReader` resumes with exponential backoff capped at 60 s, and gives up after 30 resumes in a row that got no new bytes (about a 30 minute outage). Drops with progress in between don't count. The first version capped total resumes at 50, and 2024-10 hit that at byte 14.45 GB of 30.74 GB after 22 h: one drop every 20–60 min, each after new data. 2024-08 finished on the same link after 24 resumes. A resume must get HTTP 206 with a `Content-Range` starting at exactly N, or the month fails at once.
+Why: Bytes still arrive contiguous and exactly once, so D-009 holds: the checksum covers the whole file, and nothing raw touches disk. Tests show a stream cut 5 times (by exceptions or early EOFs) gives byte-identical Parquet. Lichess answered a real resume with 206 `bytes 1000000-…`. (c) breaks the no-raw-on-disk rule and needs 30 GB of scratch space.
+Label: defensible. Fragile points:
+- It trusts the file not to change between resumes. Lichess files are immutable, and the end-of-stream checksum is the backstop, but a mismatch is only caught at the end.
+- A server or proxy that ignores `Range` is refused rather than spliced in.
+Revisit if: streams need to resume across process restarts. That needs checkpointed parser and writer state, which this doesn't keep.
+
+## D-031 — Score blunders with a list lambda per game, not unnest + join
+Date: 2026-11-22 · Phase: 5 · Status: Accepted
+Context: After three 2024 months, `dbt build` went from 71 s to 562 s. 537 s of that was `fct_opening_blunders`, which took 584 s when run alone. Its input is small: 25.0M analysed games and 1.64B evals, scanned in 2.9 s. DuckDB's JSON profile showed where the time went:
+- the `from analysed, unnest(generate_series(2, len(evals_cp)))` lateral join is decorrelated into a hash group-by of the games, eval lists included (907 CPU-s);
+- then a hash join of 1.6B plies back to them (1,439 CPU-s, 580 GB intermediate);
+- then a left join of the blunders back to every game × colour (208 CPU-s);
+- peak memory 13.8 GB against a 12.7 GB limit, and 30.7 GB spilled to temp disk.
+Options: (a) raise `memory_limit` / threads; (b) keep one row per ply, but carry the grouping columns through the unnest so no join back is needed; (c) score each game's `evals_cp` in place with `list_filter(range(2, n + 1), lambda p: ...)`, giving the list of blunder plies, then split by colour and phase with `len(list_filter(...))`.
+Decision: (c). No unnest, no join, one pass over the games.
+Why: It is the same rule written over the list instead of over rows. On three 2024 months it takes 26.4 s alone (22× faster) and 42 s inside `dbt build`, which now takes 70 s. The output is identical to the old table (`EXCEPT ALL` both ways: 0 rows), and the hand-built unit test still passes. (a) treats the symptom on a 16 GB laptop. (b) still materializes 1.6B rows.
+Label: defensible. Fragile points:
+- The lambda reads `evals_cp` from the enclosing row, which needs DuckDB's lambda column capture (present in 2.0.0).
+- `blunders` is now cast to `BIGINT`. The old HUGEINT sum exported to Parquet as `DOUBLE`.
+Revisit if: the blunder rule needs per-ply context the list form can't express cleanly (e.g. the move played). Then use (b).

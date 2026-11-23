@@ -2,14 +2,17 @@
 
     JAVA_HOME=/opt/homebrew/opt/openjdk@17 uv run python -m lichess.spark_jobs.silver_games --month 2013-02
 
-Writes `silver_root/month=YYYY-MM/` with dynamic partition overwrite, so only that
-month is replaced (D-005). Exit code 3 means a data-quality failure, which a retry
+Writes the month to a staging dir, runs the checks on the written files, then swaps
+it into `silver_root/month=YYYY-MM/`, so only that month is replaced and a failed check
+leaves the old partition in place (D-005, D-025). Exit code 3 means a data-quality failure, which a retry
 won't fix; any other non-zero exit (JVM crash, OOM) may be worth retrying.
 """
 
 import argparse
 import json
 import math
+import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -17,9 +20,12 @@ from pathlib import Path
 from pyspark.sql import Column, DataFrame, SparkSession, Window
 from pyspark.sql import functions as F
 
-# Spark's default 200 shuffle partitions gave 200 files of ~200 KB for 2013-02. Size
-# the file count from the row count instead; phase 5 measures the right target (D-017).
-ROWS_PER_FILE = 500_000
+from lichess.bronze import swap_in
+
+# Target rows per silver file. coalesce can only merge input splits, so a file is at
+# most this big and at least one bronze split (D-017, D-025). Without movetext a 2024
+# row is ~46 bytes of zstd Parquet, so this is ~115 MB per file (D-026).
+ROWS_PER_FILE = 2_500_000
 EXIT_DATA_ERROR = 3
 # Mate scores have no centipawn value. Store them as +/- this sentinel (sign = side that
 # mates); gold clamps every eval well inside it before measuring swings (D-022).
@@ -40,7 +46,6 @@ def spark_session(
         SparkSession.builder.master(master)
         .appName(app_name)
         .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.sql.sources.partitionOverwriteMode", "dynamic")
         .config("spark.sql.parquet.compression.codec", "zstd")
         .config("spark.ui.showConsoleProgress", "false")
         .config("spark.driver.memory", "4g")
@@ -107,18 +112,34 @@ def add_columns(bronze: DataFrame, month: str) -> DataFrame:
 
 
 def dedup(df: DataFrame) -> DataFrame:
+    """Drop null ids and keep one row per game_id, shuffling only the id column.
+
+    A window over all rows would shuffle every column, movetext included: 5.5x the
+    compressed input in Spark temp files on a 2024 sample (D-025). Instead, find the
+    duplicated ids from the id column alone, pass unique rows through untouched, and run
+    the window only on the duplicated rows.
+    """
+    df = df.where(F.col("game_id").isNotNull())
+    # Broadcast: duplicates are rare (none in 2013 H1), so this list is tiny.
+    dup_ids = F.broadcast(
+        df.groupBy("game_id").count().where("count > 1").select("game_id")
+    )
+    unique = df.join(dup_ids, "game_id", "left_anti")
     # Deterministic winner so a rerun keeps the same row when duplicates differ.
     w = Window.partitionBy("game_id").orderBy("utc_datetime", "movetext")
-    return (
-        df.where(F.col("game_id").isNotNull())
+    winners = (
+        df.join(dup_ids, "game_id", "left_semi")
         .withColumn("_rn", F.row_number().over(w))
         .where("_rn = 1")
         .drop("_rn")
     )
+    return unique.unionByName(winners)
 
 
 def build_silver(bronze: DataFrame, month: str) -> DataFrame:
-    return add_columns(dedup(bronze), month)
+    # movetext is ~90% of a 2024 row and gold never reads it; evals_cp already holds
+    # what gold needs from it. Bronze keeps the raw text (D-026).
+    return add_columns(dedup(bronze), month).drop("movetext")
 
 
 def check_quality(silver: DataFrame, expected_rows: int) -> dict[str, int]:
@@ -156,11 +177,68 @@ def check_quality(silver: DataFrame, expected_rows: int) -> dict[str, int]:
     return {"rows": rows, "distinct_ids": distinct_ids}
 
 
-def run(spark: SparkSession, month: str, bronze_root: Path, silver_root: Path) -> dict:
+def _read_json(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return None
+
+
+def _write_json(path: Path, data: dict) -> None:
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.rename(path)
+
+
+def drop_bronze_parquet(bronze_path: Path, bronze_stats: dict) -> int:
+    """Delete a month's bronze Parquet once silver is built from it; keep `_stats.json`
+    marked `parquet_dropped`, so the verified checksum and parse stats stay on record and
+    bronze's skip-if-current still recognises the month (D-026). Returns bytes freed."""
+    parts = list(bronze_path.glob("*.parquet"))
+    freed = sum(f.stat().st_size for f in parts)
+    # Mark first: a crash between the two steps leaves Parquet that silver just rebuilds
+    # from, never a "dropped" month whose files are half gone without the mark.
+    _write_json(
+        bronze_path / "_stats.json",
+        bronze_stats | {"parquet_dropped": True, "parquet_dropped_bytes": freed},
+    )
+    for f in parts:
+        f.unlink()
+    return freed
+
+
+def run(
+    spark: SparkSession,
+    month: str,
+    bronze_root: Path,
+    silver_root: Path,
+    drop_bronze: bool = False,
+) -> dict:
     started = time.monotonic()
     bronze_path = bronze_root / f"month={month}"
-    if not bronze_path.is_dir():
-        raise FileNotFoundError(f"no bronze partition at {bronze_path}")
+    final = silver_root / f"month={month}"
+    bronze_stats = _read_json(bronze_path / "_stats.json")
+    if not any(bronze_path.glob("*.parquet")):
+        silver_stats = _read_json(final / "_stats.json")
+        if (
+            bronze_stats
+            and bronze_stats.get("parquet_dropped")
+            and silver_stats
+            and silver_stats.get("bronze_sha256") == bronze_stats.get("sha256")
+        ):
+            return {
+                "status": "skipped",
+                "month": month,
+                "bronze_sha256": bronze_stats["sha256"],
+            }
+        raise FileNotFoundError(
+            f"no bronze Parquet at {bronze_path} and no silver built from it; "
+            "re-stream the month (bronze without --skip-if-current, or force in the DAG)"
+        )
+    if drop_bronze and not (bronze_stats and bronze_stats.get("checksum_verified")):
+        # Without a verified checksum on record, a later run couldn't tell that silver
+        # is current, and the month would be gone with nothing to rebuild it from.
+        raise ValueError(f"won't drop {bronze_path}: no verified sha256 in _stats.json")
     bronze = spark.read.parquet(str(bronze_path))
 
     # Counted on bronze independently of the dedup code path, so the DQ check compares
@@ -172,29 +250,52 @@ def run(spark: SparkSession, month: str, bronze_root: Path, silver_root: Path) -
     ).first()
     bronze_rows, null_ids, expected = b["rows"], b["null_ids"] or 0, b["distinct_ids"]
 
+    # Staging sits next to silver_root, not inside it, so readers globbing silver never
+    # see it; same filesystem, so the swap is two renames.
+    tmp = (
+        silver_root.parent
+        / f"_staging_{silver_root.name}"
+        / f"month={month}-{os.getpid()}"
+    )
+    shutil.rmtree(tmp, ignore_errors=True)
     files = max(1, math.ceil(expected / ROWS_PER_FILE))
-    silver = build_silver(bronze, month).repartition(files, "game_id").cache()
     try:
-        check_quality(silver, expected)
-        silver.write.mode("overwrite").partitionBy("month").parquet(str(silver_root))
-    finally:
-        silver.unpersist()
-
-    written = spark.read.parquet(str(silver_root / f"month={month}")).count()
-    if written != expected:
-        raise DataQualityError(
-            f"read back {written} rows from silver, expected {expected}"
+        # coalesce merges input splits without a shuffle, so file size costs no temp
+        # disk. Checks run on what was written rather than on a cached frame.
+        build_silver(bronze, month).drop("month").coalesce(files).write.parquet(
+            str(tmp)
         )
+        quality = check_quality(spark.read.parquet(str(tmp)), expected)
+        parts = list(tmp.glob("*.parquet"))
+        stats = {
+            "status": "written",
+            "month": month,
+            # Identity of the input; lets a later run skip once bronze is dropped.
+            "bronze_sha256": (bronze_stats or {}).get("sha256"),
+            "bronze_rows": bronze_rows,
+            "dropped_null_id": null_ids,
+            "dropped_duplicates": bronze_rows - null_ids - expected,
+            "silver_rows": quality["rows"],
+            "files": len(parts),
+            "silver_bytes": sum(f.stat().st_size for f in parts),
+        }
+        _write_json(tmp / "_stats.json", stats)
+    except BaseException:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    silver_root.mkdir(parents=True, exist_ok=True)
+    swap_in(tmp, final)
+    try:
+        tmp.parent.rmdir()
+    except OSError:  # another month's staging dir is still there
+        pass
 
-    return {
-        "month": month,
-        "bronze_rows": bronze_rows,
-        "dropped_null_id": null_ids,
-        "dropped_duplicates": bronze_rows - null_ids - expected,
-        "silver_rows": written,
-        "files": files,
-        "runtime_seconds": round(time.monotonic() - started, 2),
-    }
+    if drop_bronze:
+        stats["bronze_bytes_dropped"] = drop_bronze_parquet(bronze_path, bronze_stats)
+    stats["runtime_seconds"] = round(time.monotonic() - started, 2)
+    # Runtime goes in the printed summary only, so silver's _stats.json is identical
+    # across reruns of the same input.
+    return stats
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -202,12 +303,17 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--month", required=True, help="YYYY-MM")
     ap.add_argument("--bronze", type=Path, default=Path("data/bronze"))
     ap.add_argument("--silver", type=Path, default=Path("data/silver/games"))
+    ap.add_argument(
+        "--drop-bronze",
+        action="store_true",
+        help="delete the month's bronze Parquet after silver passes its checks",
+    )
     args = ap.parse_args(argv)
 
     spark = spark_session()
     spark.sparkContext.setLogLevel("WARN")
     try:
-        stats = run(spark, args.month, args.bronze, args.silver)
+        stats = run(spark, args.month, args.bronze, args.silver, args.drop_bronze)
     except DataQualityError as e:
         print(f"data quality check failed: {e}", file=sys.stderr)
         return EXIT_DATA_ERROR

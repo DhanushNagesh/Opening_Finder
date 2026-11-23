@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import shutil
 import subprocess
@@ -284,3 +285,61 @@ def test_quality_check_fails_on_misaligned_evals(spark, tmp_path: Path) -> None:
     write_bronze(tmp_path / "b", "2013-02", [bad])
     with pytest.raises(DataQualityError, match="evals_cp length"):
         run(spark, "2013-02", tmp_path / "b", tmp_path / "s")
+
+
+def test_silver_has_no_movetext(spark) -> None:
+    out = silver_rows(spark, [bronze_row()])
+    assert "movetext" not in out[0]
+    assert "evals_cp" in out[0]
+
+
+def _verified_bronze(tmp_path: Path) -> Path:
+    raw = zstandard.ZstdCompressor().compress(
+        (FIXTURES / "2013-02_first_500.pgn").read_bytes()
+    )
+    root = tmp_path / "bronze"
+    bronze.write_partition("2013-02", io.BytesIO(raw), root, None, source="t")
+    # write_partition with no expected hash records checksum_verified=false; pretend it
+    # was checked so the drop is allowed.
+    stats_path = root / "month=2013-02" / "_stats.json"
+    stats = json.loads(stats_path.read_text()) | {"checksum_verified": True}
+    stats_path.write_text(json.dumps(stats))
+    return root
+
+
+def test_drop_bronze_then_skip_then_refuse(spark, tmp_path: Path) -> None:
+    from lichess.spark_jobs.silver_games import run
+
+    broot, sroot = _verified_bronze(tmp_path), tmp_path / "silver"
+    month_dir = broot / "month=2013-02"
+    sha = json.loads((month_dir / "_stats.json").read_text())["sha256"]
+
+    first = run(spark, "2013-02", broot, sroot, drop_bronze=True)
+    assert first["status"] == "written" and first["silver_rows"] == 500
+    assert first["bronze_bytes_dropped"] > 0
+    assert not list(month_dir.glob("*.parquet"))
+    bstats = json.loads((month_dir / "_stats.json").read_text())
+    assert bstats["parquet_dropped"] is True and bstats["sha256"] == sha
+    assert (
+        json.loads((sroot / "month=2013-02" / "_stats.json").read_text())[
+            "bronze_sha256"
+        ]
+        == sha
+    )
+
+    # Bronze gone, silver built from the same bytes: nothing to do.
+    assert run(spark, "2013-02", broot, sroot)["status"] == "skipped"
+
+    # Silver lost after bronze was dropped: fail loudly, don't write an empty month.
+    shutil.rmtree(sroot / "month=2013-02")
+    with pytest.raises(FileNotFoundError, match="re-stream"):
+        run(spark, "2013-02", broot, sroot)
+
+
+def test_drop_bronze_refused_without_verified_checksum(spark, tmp_path: Path) -> None:
+    from lichess.spark_jobs.silver_games import run
+
+    write_bronze(tmp_path / "b", "2013-02", [bronze_row()])
+    with pytest.raises(ValueError, match="verified sha256"):
+        run(spark, "2013-02", tmp_path / "b", tmp_path / "s", drop_bronze=True)
+    assert list((tmp_path / "b" / "month=2013-02").glob("*.parquet"))

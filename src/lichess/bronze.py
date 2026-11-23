@@ -14,6 +14,7 @@ matches, so a failed run leaves the previous partition as it was (D-005).
 
 import argparse
 import hashlib
+import http.client
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ import shutil
 import sys
 import time
 import urllib.request
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -114,6 +116,106 @@ class HashingReader:
         """Hash whatever the decompressor didn't need (zstd can stop before the last byte)."""
         while self.read(1 << 20):
             pass
+
+
+# A 30 GB month over a home link sees stalls and resets; one of them shouldn't throw away
+# hours of streaming. Each drop reopens at the next byte with a Range request (D-030).
+# Consecutive resumes that got no new bytes; with the 60 s backoff cap, about a
+# 30 minute outage. Drops with progress in between never count against it (D-030).
+MAX_STALLED_RESUMES = 30
+RESUME_BACKOFF_MAX_S = 60.0
+_RETRYABLE = (OSError, http.client.HTTPException)  # timeouts, resets, TLS, short reads
+
+
+class ResumingReader:
+    """File-like over `open_at(offset)` that reopens at the current offset when a read
+    fails or the body ends early. Bytes come out contiguous and exactly once, so the
+    hash and the decompressor downstream never see the reconnect."""
+
+    def __init__(
+        self,
+        open_at: Callable[[int], BinaryIO],
+        length: int,
+        first: BinaryIO | None = None,
+        max_stalled: int = MAX_STALLED_RESUMES,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        self._open_at = open_at
+        self._length = length
+        self._resp = first if first is not None else open_at(0)
+        self._max = max_stalled
+        self._sleep = sleep
+        self.pos = 0
+        self.resumes = 0
+        self.stalled = 0
+        self._last_resume_pos = -1
+
+    def read(self, size: int = -1) -> bytes:
+        while True:
+            try:
+                chunk = self._resp.read(size)
+            except _RETRYABLE as e:
+                self._resume(e)
+                continue
+            # Without a length an empty read is EOF; with one, it's EOF only at the end.
+            if chunk or not self._length or self.pos >= self._length:
+                self.pos += len(chunk)
+                return chunk
+            self._resume(None)
+
+    def _resume(self, err: BaseException | None) -> None:
+        if not self._length:
+            raise BronzeError("connection dropped and the length is unknown") from err
+        while True:
+            self.resumes += 1
+            self.stalled = self.stalled + 1 if self.pos == self._last_resume_pos else 1
+            self._last_resume_pos = self.pos
+            if self.stalled > self._max:
+                raise BronzeError(
+                    f"gave up after {self._max} resumes with no progress at byte "
+                    f"{self.pos:,} ({self.resumes - 1} resumes in total)"
+                ) from err
+            wait = min(RESUME_BACKOFF_MAX_S, 2.0 ** min(self.stalled, 6))
+            log.warning(
+                "stream dropped at byte %s of %s (%s); resume %d in %.0f s",
+                f"{self.pos:,}",
+                f"{self._length:,}",
+                type(err).__name__ if err else "early EOF",
+                self.resumes,
+                wait,
+            )
+            try:
+                self._resp.close()
+            except _RETRYABLE:
+                pass
+            self._sleep(wait)
+            try:
+                self._resp = self._open_at(self.pos)
+                return
+            except _RETRYABLE as e:
+                err = e
+
+    def close(self) -> None:
+        self._resp.close()
+
+
+def open_range(url: str, start: int) -> BinaryIO:
+    headers = {"User-Agent": USER_AGENT}
+    if start:
+        headers["Range"] = f"bytes={start}-"
+    resp = urllib.request.urlopen(
+        urllib.request.Request(url, headers=headers), timeout=60
+    )
+    if start:
+        # A server that ignores Range sends the file from byte 0; splicing that in would
+        # corrupt the stream (the checksum would catch it, hours later). Fail now.
+        cr = resp.headers.get("Content-Range", "")
+        if resp.status != 206 or not cr.startswith(f"bytes {start}-"):
+            resp.close()
+            raise BronzeError(
+                f"resume at {start} got HTTP {resp.status} Content-Range {cr!r}"
+            )
+    return resp
 
 
 def published_sha256(filename: str, url: str = CHECKSUM_URL) -> str:
@@ -262,11 +364,11 @@ def write_partition(
         shutil.rmtree(tmp, ignore_errors=True)
         raise
 
-    _swap_in(tmp, final)
+    swap_in(tmp, final)
     return result
 
 
-def _swap_in(tmp: Path, final: Path) -> None:
+def swap_in(tmp: Path, final: Path) -> None:
     """Replace `final` with `tmp`. POSIX can't rename onto a non-empty dir, so move the
     old one aside first; the gap between the two renames is the only window in which
     the partition is missing."""
@@ -306,12 +408,17 @@ def run(month: str, source: str, out_root: Path, verify: bool = True) -> BronzeS
     if source == "url":
         url = f"{BASE_URL}/{filename}"
         expected = published_sha256(filename) if verify else None
-        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            length = int(resp.headers.get("Content-Length", 0))
+        first = open_range(url, 0)
+        length = int(first.headers.get("Content-Length", 0))
+        reader = ResumingReader(lambda start: open_range(url, start), length, first)
+        try:
             check_disk(out_root, int(length * DISK_HEADROOM))
             log.info("streaming %s (%.1f MB)", url, length / 1e6)
-            stats = write_partition(month, resp, out_root, expected, source=url)
+            stats = write_partition(month, reader, out_root, expected, source=url)
+        finally:
+            reader.close()
+        if reader.resumes:
+            log.info("stream finished after %d resumes", reader.resumes)
         # http.client raises IncompleteRead on a short body; this catches a server that
         # closes cleanly early. The checksum would catch it too, unless verify is off.
         if length and stats.bytes_read != length:

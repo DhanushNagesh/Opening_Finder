@@ -190,3 +190,113 @@ def test_data_errors_exit_3_and_others_exit_1(tmp_path: Path, monkeypatch) -> No
 def test_malformed_rate_is_a_data_error(compressed: bytes, tmp_path: Path) -> None:
     with pytest.raises(bronze.DataError):
         write(compressed[: len(compressed) - 200], tmp_path, max_malformed_rate=0.0)
+
+
+class _FlakyConn:
+    """One HTTP body starting at `start`; fails after `fail_after` bytes, either by
+    raising (a stall or reset) or by ending early (a server closing cleanly)."""
+
+    def __init__(self, data: bytes, start: int, fail_after: int | None, mode: str):
+        self._buf = io.BytesIO(data[start:])
+        self._left = fail_after
+        self._mode = mode
+
+    def read(self, size: int = -1) -> bytes:
+        if self._left is not None and self._left <= 0:
+            if self._mode == "raise":
+                raise TimeoutError("The read operation timed out")
+            return b""
+        n = size if size >= 0 else 1 << 30
+        if self._left is not None:
+            n = min(n, self._left)
+            self._left -= n
+        return self._buf.read(n)
+
+    def close(self) -> None:
+        pass
+
+
+def _flaky_reader(data: bytes, drops: int, every: int, mode: str, **kw):
+    opens: list[int] = []
+
+    def open_at(start: int) -> _FlakyConn:
+        opens.append(start)
+        fail = every if len(opens) <= drops else None
+        return _FlakyConn(data, start, fail, mode)
+
+    reader = bronze.ResumingReader(open_at, len(data), sleep=lambda _s: None, **kw)
+    return reader, opens
+
+
+@pytest.mark.parametrize("mode", ["raise", "early_eof"])
+def test_resuming_reader_gives_identical_partition(
+    compressed: bytes, tmp_path: Path, mode: str
+) -> None:
+    expected = hashlib.sha256(compressed).hexdigest()
+    clean = write(compressed, tmp_path / "clean", expected)
+
+    every = len(compressed) // 7 + 1
+    reader, opens = _flaky_reader(compressed, drops=5, every=every, mode=mode)
+    flaky = write_partition(MONTH, reader, tmp_path / "flaky", expected, source="test")
+
+    assert reader.resumes == 5
+    assert opens == [i * every for i in range(6)]  # each resume starts at the next byte
+    assert (flaky.sha256, flaky.games, flaky.bytes_read) == (
+        clean.sha256,
+        clean.games,
+        len(compressed),
+    )
+    for a, b in zip(
+        sorted((tmp_path / "clean" / f"month={MONTH}").glob("*.parquet")),
+        sorted((tmp_path / "flaky" / f"month={MONTH}").glob("*.parquet")),
+        strict=True,
+    ):
+        assert a.read_bytes() == b.read_bytes()
+
+
+def test_resuming_reader_gives_up_and_leaves_old_partition(
+    compressed: bytes, tmp_path: Path
+) -> None:
+    part = _existing_partition(tmp_path)
+    # every=0: each connection fails before sending a byte, so no resume makes progress.
+    reader, _ = _flaky_reader(
+        compressed, drops=100, every=0, mode="raise", max_stalled=3
+    )
+    with pytest.raises(BronzeError, match="gave up after 3 resumes with no progress"):
+        write_partition(MONTH, reader, tmp_path, None, source="test")
+    assert [p.name for p in part.iterdir()] == ["marker"]
+
+
+def test_drops_with_progress_never_hit_the_limit(compressed: bytes) -> None:
+    # 2024-10 failed after 50 resumes spread over 22 h, each one after new bytes.
+    every = len(compressed) // 60 + 1
+    reader, _ = _flaky_reader(
+        compressed, drops=59, every=every, mode="raise", max_stalled=3
+    )
+    out = b""
+    while chunk := reader.read(4096):
+        out += chunk
+    assert out == compressed
+    assert (reader.resumes, reader.stalled) == (59, 1)
+
+
+def test_resume_without_length_fails() -> None:
+    conn = _FlakyConn(b"x" * 10, 0, 4, "raise")
+    reader = bronze.ResumingReader(lambda s: conn, 0, first=conn, sleep=lambda _s: None)
+    assert reader.read(4) == b"xxxx"
+    with pytest.raises(BronzeError, match="length is unknown"):
+        reader.read(4)
+
+
+def test_open_range_rejects_server_that_ignores_range(monkeypatch) -> None:
+    class Resp:
+        def __init__(self) -> None:
+            self.status = 200
+            self.headers = {"Content-Length": "10"}
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(bronze.urllib.request, "urlopen", lambda req, timeout: Resp())
+    with pytest.raises(BronzeError, match="resume at 5 got HTTP 200"):
+        bronze.open_range("https://example.invalid/x", 5)
