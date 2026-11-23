@@ -117,7 +117,7 @@ Gold over all 7 months (2013-01..06 plus three 2024 months, 275.1M silver rows),
 | side-games | 176,358,784 | 546,842,160 |
 | `mart_best_openings` rows | 98,792 | 152,572 |
 | `fct_opening_blunders` rows | 28,190 | 31,814 |
-| dbt build wall time, PASS=52 | 71 s | 562 s |
+| dbt build wall time, PASS=52 | 71 s | 562 s (70 s after D-031) |
 
 Takeaway:
 - **The cost per month is flat:**
@@ -132,12 +132,12 @@ Takeaway:
   - The link averaged 1.0 to 3.3 MB/s while the laptop was awake.
   - The parser can take about 11 MB/s compressed on one core (task 2).
   - Being resumable mattered more than parsing speed: before D-030, one stall 63 min into 2024-08 lost the whole run.
-- **dbt took 8× longer for 3× the data, and one model is responsible.** From `dbt/target/run_results.json`:
+- **dbt took 8× longer for 3× the data, and one model was responsible.** From `dbt/target/run_results.json`:
   - `fct_opening_blunders`: 537 s of the 559 s build;
   - `fct_opening_performance`: 14 s;
   - the two `unique game_id` tests: 11 s and 10 s.
 
-  I haven't profiled the blunder model yet. It reads the `stg_games` view twice: once to unnest every eval and once to cross-join each game with both colours. It also left-joins the two on `game_id`, so the 275M-row silver scan, the `evals_cp` list reads and a large hash join may all happen twice. That's the model to fix before adding more months.
+  DuckDB's profile showed the per-ply `unnest` being decorrelated into a group-by of 25M games with their eval lists, plus a 1.6B-row hash join back (580 GB intermediate). It hit 13.8 GB of memory and spilled 30.7 GB to temp disk. Scoring each eval list in place with a list lambda (D-031) took the model from 584 s to 26.4 s alone, with identical output. The full `dbt build` went from 562 s to **70 s**, the same as the one-month build before the two extra months.
 
 ## Parser: single process vs. chunked process pool (phase 5, task 2)
 

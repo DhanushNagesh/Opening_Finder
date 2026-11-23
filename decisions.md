@@ -294,3 +294,18 @@ Label: defensible. Fragile points:
 - It trusts the file not to change between resumes. Lichess files are immutable, and the end-of-stream checksum is the backstop, but a mismatch is only caught at the end.
 - A server or proxy that ignores `Range` is refused rather than spliced in.
 Revisit if: streams need to resume across process restarts. That needs checkpointed parser and writer state, which this doesn't keep.
+
+## D-031 — Score blunders with a list lambda per game, not unnest + join
+Date: 2026-11-22 · Phase: 5 · Status: Accepted
+Context: After three 2024 months, `dbt build` went from 71 s to 562 s. 537 s of that was `fct_opening_blunders`, which took 584 s when run alone. Its input is small: 25.0M analysed games and 1.64B evals, scanned in 2.9 s. DuckDB's JSON profile showed where the time went:
+- the `from analysed, unnest(generate_series(2, len(evals_cp)))` lateral join is decorrelated into a hash group-by of the games, eval lists included (907 CPU-s);
+- then a hash join of 1.6B plies back to them (1,439 CPU-s, 580 GB intermediate);
+- then a left join of the blunders back to every game × colour (208 CPU-s);
+- peak memory 13.8 GB against a 12.7 GB limit, and 30.7 GB spilled to temp disk.
+Options: (a) raise `memory_limit` / threads; (b) keep one row per ply, but carry the grouping columns through the unnest so no join back is needed; (c) score each game's `evals_cp` in place with `list_filter(range(2, n + 1), lambda p: ...)`, giving the list of blunder plies, then split by colour and phase with `len(list_filter(...))`.
+Decision: (c). No unnest, no join, one pass over the games.
+Why: It is the same rule written over the list instead of over rows. On three 2024 months it takes 26.4 s alone (22× faster) and 42 s inside `dbt build`, which now takes 70 s. The output is identical to the old table (`EXCEPT ALL` both ways: 0 rows), and the hand-built unit test still passes. (a) treats the symptom on a 16 GB laptop. (b) still materializes 1.6B rows.
+Label: defensible. Fragile points:
+- The lambda reads `evals_cp` from the enclosing row, which needs DuckDB's lambda column capture (present in 2.0.0).
+- `blunders` is now cast to `BIGINT`. The old HUGEINT sum exported to Parquet as `DOUBLE`.
+Revisit if: the blunder rule needs per-ply context the list form can't express cleanly (e.g. the move played). Then use (b).
