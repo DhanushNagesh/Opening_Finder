@@ -25,6 +25,14 @@ def _gold_db(path):
             blunders_per_game_moves_11_25, blunders_per_game_moves_26_plus)
     """)
     con.execute("""
+        create table fct_opening_performance as select * from (values
+            (1200, 'blitz', 'white', 250::hugeint),
+            (1200, 'blitz', 'white', 250::hugeint),
+            (1200, 'blitz', 'black', 500::hugeint),
+            (1300, 'rapid', 'white', 7::hugeint)
+        ) t(rating_band, tc_bucket, color, games)
+    """)
+    con.execute("""
         create table stg_games as select * from (values
             ('2013-01', date '2012-12-31', false),
             ('2013-01', date '2013-01-31', true),
@@ -44,6 +52,15 @@ def test_export_writes_sorted_tables_and_meta(tmp_path):
     assert best.column("rank").to_pylist() == [1, 2]
     assert str(best.schema.field("games").type) == "int64"
     assert pq.read_table(out / "blunders.parquet").num_rows == 1
+    assert pq.read_table(out / "slices.parquet").to_pylist() == [
+        {
+            "rating_band": 1200,
+            "tc_bucket": "blitz",
+            "games": 500,
+            "games_with_eval": 40,
+        },
+        {"rating_band": 1300, "tc_bucket": "rapid", "games": 7, "games_with_eval": 0},
+    ]
 
     assert meta == json.loads((out / "meta.json").read_text())
     assert meta["games"] == 3
@@ -58,5 +75,10 @@ def test_export_is_byte_identical_on_rerun(tmp_path):
     a, b = tmp_path / "a", tmp_path / "b"
     export(db, a)
     export(db, b)
-    for name in ("best_openings.parquet", "blunders.parquet", "meta.json"):
+    for name in (
+        "best_openings.parquet",
+        "blunders.parquet",
+        "slices.parquet",
+        "meta.json",
+    ):
         assert (a / name).read_bytes() == (b / name).read_bytes()

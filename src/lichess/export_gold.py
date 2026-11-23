@@ -3,6 +3,7 @@
 Writes three files, each overwritten whole:
   best_openings.parquet  mart_best_openings, sorted by band, speed, colour, rank
   blunders.parquet       fct_opening_blunders, sorted by band, speed, colour, family
+  slices.parquet         games and analysed games per band and speed (all openings)
   meta.json              months covered and game counts, for the app's sample-size line
 
 No timestamps go into the output, so rerunning on the same gold gives the same files.
@@ -33,6 +34,20 @@ BLUNDERS_SQL = """
     order by rating_band, tc_bucket, color, opening_family
 """
 
+# Every game appears once per colour in both fact tables, so count one colour.
+SLICES_SQL = """
+    select p.rating_band, p.tc_bucket, p.games, coalesce(b.games_with_eval, 0) as games_with_eval
+    from (
+        select rating_band, tc_bucket, sum(games)::bigint as games
+        from fct_opening_performance where color = 'white' group by all
+    ) as p
+    left join (
+        select rating_band, tc_bucket, sum(games_with_eval)::bigint as games_with_eval
+        from fct_opening_blunders where color = 'white' group by all
+    ) as b using (rating_band, tc_bucket)
+    order by rating_band, tc_bucket
+"""
+
 META_SQL = """
     select month, count(*) as games, count(*) filter (where has_eval) as games_with_eval,
            min(utc_date)::varchar as first_date, max(utc_date)::varchar as last_date
@@ -49,6 +64,7 @@ def export(db_path: Path, out_dir: Path) -> dict:
         for name, sql in [
             ("best_openings", BEST_OPENINGS_SQL),
             ("blunders", BLUNDERS_SQL),
+            ("slices", SLICES_SQL),
         ]:
             path = out_dir / f"{name}.parquet"
             con.execute(
