@@ -5,7 +5,7 @@ cd "$(dirname "$0")/.."
 HF="uvx --from huggingface_hub==2.4.0 hf"
 NAME="${1:-opening-finder}"
 USER_ID="$($HF auth whoami --format json 2>/dev/null \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["name"])' 2>/dev/null || true)"
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["user"])' 2>/dev/null || true)"
 [ -n "$USER_ID" ] || { echo "not logged in: run hf auth login" >&2; exit 1; }
 REPO="$USER_ID/$NAME"
 $HF repos create "$REPO" --type space --sdk docker --flavor cpu-basic --public --exist-ok
