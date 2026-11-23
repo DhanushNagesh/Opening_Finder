@@ -86,6 +86,54 @@ Takeaway:
   - time: about 5 h per month at this link speed;
   - PLAN's 100 GB streaming cap, which needs a yes before going past it. 2024-09 used 28.6 GB, so two more months would bring the total to ~90 GB.
 
+### Two more months: 2024-08 and 2024-10
+
+Same machine and commands, run back to back by one script. Dates: 2026-11-19 to 2026-11-22. Bronze now resumes dropped streams with HTTP Range requests (D-030), so the two runs had different code from 2024-09. 2024-08 ran on a different network from 2024-09. Both runs had stretches where the laptop slept. Wall time is from `/usr/bin/time`. "Awake" is bronze's own `runtime_seconds`, which comes from a macOS clock that stops during sleep.
+
+| Month | .zst | Rows | Bronze wall | Bronze awake | Avg MB/s (wall / awake) | Resumes | CPU user | Peak RSS | Silver wall | Silver output |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 2024-09 | 28.57 GB | 87,713,219 | 18,484 s | — | 1.55 / — | 0 (no resume code yet) | 4,640 s | 716 MB | 577 s | 4.24 GB, 36 files |
+| 2024-08 | 30.04 GB | 92,198,878 | 61,756 s (17.2 h) | 30,090 s | 0.49 / 1.00 | 24 | 5,419 s | 698 MB | 939 s | 4.47 GB, 37 files |
+| 2024-10 | 30.74 GB | 94,254,891 | 18,045 s (5.0 h) | 9,352 s | 1.70 / 3.29 | 7 | 3,827 s | 694 MB | 523 s | 4.57 GB, 38 files |
+
+Checks for both months:
+- The SHA-256 of the streamed bytes matches `sha256sums.txt`, including every byte spliced in by a resume.
+- 0 malformed games, 0 stray lines, 0 null ids, 0 duplicates.
+
+The first attempt at 2024-10 got through 14.45 of 30.74 GB in 22 h, then hit the old cap of 50 resumes in total. The cap is now 30 resumes in a row with no new bytes (D-030). The rerun above started from byte 0.
+
+| Disk | 2024-09 | 2024-08 | 2024-10 |
+|---|---|---|---|
+| Free before (GB) | 125.7 | 116.7 | 106.7 |
+| Peak growth in pipeline dirs (GB) | 47.1 | 49.2 | 51.0 |
+| Peak drop in free space (GB) | 52.5 | 48.6 | 45.4 |
+| Kept (silver, GB) | 4.24 | 4.47 | 4.57 |
+
+Gold over all 7 months (2013-01..06 plus three 2024 months, 275.1M silver rows), `dbt build`:
+
+| | After 2024-09 | After all three |
+|---|---|---|
+| `fct_opening_performance` cells | 433,258 | 518,842 |
+| side-games | 176,358,784 | 546,842,160 |
+| `mart_best_openings` rows | 98,792 | 152,572 |
+| `fct_opening_blunders` rows | 28,190 | 31,814 |
+| dbt build wall time, PASS=52 | 71 s | 562 s |
+
+Takeaway:
+- **The cost per month is flat:**
+  - peak disk 47–51 GB;
+  - 4.2–4.6 GB kept;
+  - parser CPU 3.8–5.4 kCPU-s;
+  - bronze RSS under 720 MB;
+  - silver in 9–16 min.
+
+  Nothing in the pipeline grows with the number of months except silver on disk (13.9 GB for the three).
+- **Wall time is set by the link, not the code.** The same 30 GB file took 5 h or 17 h depending on network and sleep.
+  - The link averaged 1.0 to 3.3 MB/s while the laptop was awake.
+  - The parser can take about 11 MB/s compressed on one core (task 2).
+  - Being resumable mattered more than parsing speed: before D-030, one stall 63 min into 2024-08 lost the whole run.
+- **dbt took 8× longer for 3× the data.** I haven't profiled it. The likely suspects are the gold models now scanning 275M rows and the `union all` by-side expansion (547M side-games) spilling past DuckDB's memory limit on 16 GB. Check `EXPLAIN ANALYZE` on `fct_opening_performance` before adding more months.
+
 ## Parser: single process vs. chunked process pool (phase 5, task 2)
 
 Same machine (Apple M4, 10 cores, 16 GB). Date: 2026-11-18. Script: `benchmarks/parse_parallel.py <file> --workers 1 2 4 8`, best of 2 runs per cell, input read from local disk. The 2024-09 bronze stream was running at the same time, using 18–29% of one core (it's waiting on the network), so these numbers may be a few percent low.
