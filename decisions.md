@@ -309,3 +309,21 @@ Label: defensible. Fragile points:
 - The lambda reads `evals_cp` from the enclosing row, which needs DuckDB's lambda column capture (present in 2.0.0).
 - `blunders` is now cast to `BIGINT`. The old HUGEINT sum exported to Parquet as `DOUBLE`.
 Revisit if: the blunder rule needs per-ply context the list form can't express cleanly (e.g. the move played). Then use (b).
+
+## D-032 — Demo reads two Parquet files plus a JSON sidecar, loaded whole into pandas
+Date: 2026-11-22 · Phase: 6 · Status: Accepted
+Context: PLAN says export the gold tables to "one small Parquet file". There are two tables with different grains (opening × band × speed × colour, and opening family × band × speed × colour), plus the app needs the months covered and the sample size.
+Options: (a) one Parquet with a `table` discriminator column and nullable columns from both; (b) ship `gold.duckdb` itself; (c) one Parquet per table plus `meta.json`.
+Decision: (c). `best_openings.parquet` (152,572 rows, 4.26 MB), `blunders.parquet` (31,814 rows, 0.65 MB), `meta.json`. The app reads them with pandas and filters in memory; no DuckDB in the Space.
+Why: (a) is a union of two unrelated schemas that every reader has to un-union. (b) ties the Space to the exact DuckDB storage version and copies the 270M-row `stg_games` view definition that points at local silver. At 5 MB, loading everything into pandas once and filtering per request is simpler than a query engine and keeps the Space's dependencies to streamlit alone.
+Label: defensible.
+Revisit if: the export grows past ~100 MB (more months or finer grain), at which point pushing filters into Parquet row groups with DuckDB or pyarrow beats loading it all.
+
+## D-033 — Demo runs Streamlit in the browser (stlite) on a static Space
+Date: 2026-11-22 · Phase: 6 · Status: Accepted
+Context: Creating the Docker Space failed with 402: Hugging Face now requires a PRO subscription for Docker and Gradio Spaces, even on free cpu-basic. Static Spaces stay free.
+Options: (a) HF PRO (paid monthly) and keep the Docker Space; (b) Streamlit Community Cloud, which deploys from GitHub (repo is private, link on streamlit.app); (c) stlite: the same Streamlit script run on Pyodide in the visitor's browser, served from a static Space.
+Decision: (c). `app/index.html` mounts `@stlite/browser` 1.12.1 (Streamlit 1.65, Python 3.14, pyarrow bundled), which fetches `streamlit_app.py`, `finder.py` and `data/` from the Space. The Dockerfile is gone.
+Why: the app is a read-only lookup over 5 MB of Parquet, so a server adds nothing but cost. stlite keeps the Python code unchanged and the link on Hugging Face for $0. The price is a slow first visit (roughly 20 s here while Pyodide, pandas and pyarrow download; cached afterwards) and a Streamlit pinned to whatever stlite bundles.
+Label: defensible.
+Revisit if: the app needs anything server-side (secrets, a database bigger than a browser should download, writes), or first-load time matters more than $0.

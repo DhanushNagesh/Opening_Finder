@@ -1,0 +1,71 @@
+{
+  "months": [
+    {
+      "month": "2013-01",
+      "games": 120206,
+      "games_with_eval": 518,
+      "first_date": "2012-12-31",
+      "last_date": "2013-01-31"
+    },
+    {
+      "month": "2013-02",
+      "games": 122568,
+      "games_with_eval": 463,
+      "first_date": "2013-01-31",
+      "last_date": "2013-02-28"
+    },
+    {
+      "month": "2013-03",
+      "games": 157315,
+      "games_with_eval": 647,
+      "first_date": "2013-02-28",
+      "last_date": "2013-03-31"
+    },
+    {
+      "month": "2013-04",
+      "games": 156708,
+      "games_with_eval": 658,
+      "first_date": "2013-03-31",
+      "last_date": "2013-04-30"
+    },
+    {
+      "month": "2013-05",
+      "games": 178308,
+      "games_with_eval": 943,
+      "first_date": "2013-04-30",
+      "last_date": "2013-05-31"
+    },
+    {
+      "month": "2013-06",
+      "games": 222552,
+      "games_with_eval": 965,
+      "first_date": "2013-05-31",
+      "last_date": "2013-06-30"
+    },
+    {
+      "month": "2024-08",
+      "games": 91511275,
+      "games_with_eval": 8416266,
+      "first_date": "2024-08-01",
+      "last_date": "2024-08-31"
+    },
+    {
+      "month": "2024-09",
+      "games": 87221735,
+      "games_with_eval": 7934051,
+      "first_date": "2024-09-01",
+      "last_date": "2024-09-30"
+    },
+    {
+      "month": "2024-10",
+      "games": 93730413,
+      "games_with_eval": 8658283,
+      "first_date": "2024-10-01",
+      "last_date": "2024-10-31"
+    }
+  ],
+  "games": 273421080,
+  "games_with_eval": 25012794,
+  "first_date": "2012-12-31",
+  "last_date": "2024-10-31"
+}
