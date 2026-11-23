@@ -3,8 +3,7 @@ title: Opening Finder
 emoji: ♟
 colorFrom: gray
 colorTo: green
-sdk: docker
-app_port: 7860
+sdk: static
 pinned: false
 short_description: Best Lichess openings for your rating, from 273M games
 ---

@@ -2,7 +2,9 @@
 
 Enter your Lichess rating, time control and colour; get the openings that score best for players like you, plus the opening families where players at your level blunder most.
 
-**Live demo:** _link added once the Space is deployed_
+**Live demo:** https://huggingface.co/spaces/dhNagesh/opening-finder (Streamlit running in your browser; the first load takes ~20 s)
+
+![Opening Finder at 1200 blitz, White](docs/img/demo_1200_blitz_white.jpg)
 
 Built from 273 million rated games in the Lichess open database (2013-01 to 2013-06 and 2024-08 to 2024-10), parsed from the raw `.pgn.zst` dumps by a streaming parser written for this project.
 
@@ -19,7 +21,7 @@ flowchart LR
     S --> SP[("data/silver<br/>month=YYYY-MM/")]
     SP --> D
     D --> G[("gold.duckdb<br/>stg_games, fct_opening_performance,<br/>fct_opening_blunders, mart_best_openings")]
-    G -- "export_gold<br/>4.9 MB Parquet" --> A["Streamlit on<br/>Hugging Face Spaces"]
+    G -- "export_gold<br/>4.9 MB Parquet" --> A["Streamlit via stlite<br/>static HF Space,<br/>runs in the browser"]
 ```
 
 | Layer | What it does | Tool |
@@ -28,7 +30,7 @@ flowchart LR
 | Silver | Dedups on `game_id`, derives rating band (average Elo, floor 100), speed from `TimeControl`, opening family, per-ply evals in centipawns; checks row counts and nulls on the staged output before swapping it in | PySpark 3.5 |
 | Gold | Opening performance by band × speed × colour, Wilson lower bound on score, blunders per game by phase from analysed games only | dbt-core + dbt-duckdb, 47 tests |
 | Orchestration | One DAG, `months` param, dynamic task mapping per month, idempotent partition overwrite | Airflow 3 (docker-compose) |
-| Demo | Reads the exported gold Parquet into pandas | Streamlit, Docker Space |
+| Demo | Reads the exported gold Parquet into pandas, in the visitor's browser (D-033) | Streamlit on stlite (Pyodide), static Hugging Face Space |
 
 Openings are ranked by the **Wilson lower bound** on score, not by raw score, so an opening with 12 games at 75% can't outrank one with 40,000 games at 56% (D-007). Lines need at least 100 games in a slice to be ranked (D-024).
 
@@ -66,6 +68,12 @@ The demo runs from the gold export committed under `app/data/`; no pipeline run 
 
 ```bash
 uv run streamlit run app/streamlit_app.py
+```
+
+To check the stlite build the Space serves, open http://localhost:8502 after:
+
+```bash
+python3 -m http.server 8502 --directory app
 ```
 
 To rebuild everything for one month:
@@ -109,7 +117,7 @@ docker compose exec airflow-scheduler airflow dags trigger lichess_pipeline --co
 dags/            Airflow DAG
 src/lichess/     parser, bronze writer, Spark silver job, gold export
 dbt/             staging and mart models, tests, docs
-app/             Streamlit demo, its Dockerfile and the exported gold data
+app/             Streamlit demo, its stlite page and the exported gold data
 benchmarks/      benchmark scripts and results.md
 tests/           pytest, with hand-written PGN fixtures
 decisions.md     decision log
