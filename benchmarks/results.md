@@ -132,7 +132,12 @@ Takeaway:
   - The link averaged 1.0 to 3.3 MB/s while the laptop was awake.
   - The parser can take about 11 MB/s compressed on one core (task 2).
   - Being resumable mattered more than parsing speed: before D-030, one stall 63 min into 2024-08 lost the whole run.
-- **dbt took 8× longer for 3× the data.** I haven't profiled it. The likely suspects are the gold models now scanning 275M rows and the `union all` by-side expansion (547M side-games) spilling past DuckDB's memory limit on 16 GB. Check `EXPLAIN ANALYZE` on `fct_opening_performance` before adding more months.
+- **dbt took 8× longer for 3× the data, and one model is responsible.** From `dbt/target/run_results.json`:
+  - `fct_opening_blunders`: 537 s of the 559 s build;
+  - `fct_opening_performance`: 14 s;
+  - the two `unique game_id` tests: 11 s and 10 s.
+
+  I haven't profiled the blunder model yet. It reads the `stg_games` view twice: once to unnest every eval and once to cross-join each game with both colours. It also left-joins the two on `game_id`, so the 275M-row silver scan, the `evals_cp` list reads and a large hash join may all happen twice. That's the model to fix before adding more months.
 
 ## Parser: single process vs. chunked process pool (phase 5, task 2)
 
@@ -171,6 +176,8 @@ Every run's result fingerprint (cells, side-games, wins, draws, Σ Wilson bound)
 | | Spark, 200 shuffle partitions (default) | 1.33 s | 22.48 s | 19.93 s (18.22 s earlier) | 4.6× |
 | 2013 H1 + 2024-09: 88,679,247 rows, 4,271 MB | DuckDB | 0.05 s | 4.96 s | 5.56 s (4.02 s earlier) | — |
 | | Spark, 200 shuffle partitions (default) | 1.49 s | 27.17 s | 23.25 s (22.84 s earlier) | 4.2× |
+| 2024-08 + 09 + 10: 274,166,988 rows, 13,277 MB (2026-11-22, `--repeat 3`) | DuckDB | 0.01 s | 10.18 s | 10.28 s | — |
+| | Spark, 200 shuffle partitions (default) | 1.32 s | 52.09 s | 50.85 s | 4.9× |
 
 2024 runs (2026-11-18, after the stream had finished, so nothing else was running):
 - The query now also requires `white_score is not null`, matching `stg_games` after D-029. 2013 fingerprints are unchanged by that.
@@ -181,6 +188,7 @@ Every run's result fingerprint (cells, side-games, wins, draws, Σ Wilson bound)
 Takeaway so far: at 2013 sizes DuckDB wins 8–11× on a warm query and about 40× on what a dbt run actually pays (start + first query: 0.08 s vs. 2.9–4.5 s). Spark's cost here is fixed per-query overhead (planning, task scheduling, the shuffle stage), not throughput. Going from 1 to 6 months, 8× the rows, Spark's warm time only grows 2.1–2.5× while DuckDB's grows 2.3×, so neither is anywhere near its limit. Tuning shuffle partitions to the core count trims Spark by 18–30% and doesn't change the verdict. Takeaway at 2024 scale:
 - **DuckDB still wins, but by 4–5× instead of 8–11×.** From 2013 H1 to 2024-09 (91× the rows), DuckDB's warm time grew ~70× (0.06 → 3.9–4.3 s) and Spark's ~28× (0.67 → 18–20 s).
 - Spark's fixed overhead got diluted, which is the expected curve. The crossover isn't on one machine: 88M rows, 4.2 GB, is one 2024 month, and DuckDB answers it in ~4 s with no JVM.
+- **At three 2024 months (3.1× the rows of 2024-09), both engines scaled about linearly.** DuckDB went from 4.3 s to 10.3 s (2.4×) and Spark from 19.9 s to 50.8 s (2.6×). The gap held at 4.9×, and the fingerprints match (489,540 cells, 544,926,846 side-games).
 - **Defensible: keep gold on dbt-duckdb (D-006).** Spark earns its place on a cluster, when silver is many months bigger than one machine's RAM and disk. That's not where this project's gold runs.
 
 ## File sizing: many tiny Parquet files vs. a few large ones (phase 5, task 4)
